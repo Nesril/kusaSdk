@@ -1,0 +1,9 @@
+Metadata-Version: 2.1
+Name: kusa
+Version: 0.1.0
+Summary: SDK for accessing purchased datasets
+Author: HAWD Techs
+Author-email: haws@gmail.com
+Requires-Python: >=3.6
+Requires-Dist: requests
+Requires-Dist: pandas

@@ -3,6 +3,10 @@ import os
 import base64
 import crypto
 
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 class KusaaSDK:
     """
     KusaaSDK handles secure access, decryption, and processing of datasets for ML/DL model training.
@@ -20,7 +24,7 @@ class KusaaSDK:
         """
         self.api_key = api_key
         self.secret_key = secret_key
-        self.base_url = base_url
+        self.base_url =  os.getenv('BASE_URL')
         self.encryption_key = encryption_key or os.getenv("ENCRYPTION_KEY")
         self.session = requests.Session()
         self.session.headers.update({"Authorization": f"Bearer {self.api_key}"})

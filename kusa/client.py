@@ -1,4 +1,4 @@
-# your_sdk/client.py
+# kusa/client.py
 
 import pandas as pd
 from io import StringIO

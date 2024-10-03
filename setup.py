@@ -10,6 +10,8 @@ setup(
     install_requires=[
         'requests',
         'pandas',
+        'cryptography',
+        'numpy'
     ],
     python_requires='>=3.6',
 )

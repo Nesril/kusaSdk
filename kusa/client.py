@@ -34,6 +34,13 @@ class DatasetClient:
         if not self.public_id or not self.secret_key:
             raise DatasetSDKException("PUBLIC_ID and SECRET_KEY must be set either as parameters or in the .env file.")
         
+        try:
+            if len(self.encryption_key.encode('utf-8')) != 32:
+                raise DatasetSDKException(f"ENCRYPTION_KEY must be 32 bytes long for AES-256.  {self.encryption_key}")
+        except:
+            raise DatasetSDKException(f"ENCRYPTION_KEY must be 32 bytes long for AES-256. {self.encryption_key}")
+        # Debug statement (remove or comment out in production)
+        print(f"Encryption Key Loaded: {self.encryption_key}")
         self.headers = {
             "Authorization": f"key {self.secret_key}"
         }
@@ -178,6 +185,9 @@ class DatasetClient:
         :param key: Key used to decrypt the data
         :return: Decrypted data (bytes)
         """
+        print(key)
+        if not key:
+         raise ValueError("Key cannot be None")
         try:
             # Convert key to bytes
             key_bytes = key.encode('utf-8')

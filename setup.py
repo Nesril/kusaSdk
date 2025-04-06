@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='kusa',
-    version='0.1.3',
+    version='0.1.6',
     description='SDK for accessing purchased datasets',
     author='HAWD Techs',
     author_email='haws@gmail.com',

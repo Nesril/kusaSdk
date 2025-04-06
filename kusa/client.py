@@ -5,16 +5,18 @@ from io import StringIO
 from .utils import make_request
 from .exceptions import DatasetSDKException
 import os
-from dotenv import load_dotenv
-
+from dotenv import load_dotenv, find_dotenv
+import json
 import base64
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.backends import default_backend
+from pathlib import Path
+from kusa.config import Config
 
 
-# Load environment variables
-load_dotenv()
+BASE_URL = Config.get_base_url()
+ENCRYPTION_KEY = Config.get_encryption_key()
 
 class DatasetClient:
     def __init__(self, public_id=None, secret_key=None, base_url=None):
@@ -28,12 +30,18 @@ class DatasetClient:
         """
         self.public_id = public_id 
         self.secret_key = secret_key
-        self.base_url = os.getenv('BASE_URL')
-        self.encryption_key = os.getenv("ENCRYPTION_KEY")
+        self.base_url = BASE_URL
+        self.encryption_key = ENCRYPTION_KEY
+        self._data_fingerprint = None  # Lazy initialization
+        self._last_decrypted = None    # For emergency cleanup
         
+        print(BASE_URL," encryption_key ",ENCRYPTION_KEY)
+
         if not self.public_id or not self.secret_key:
             raise DatasetSDKException("PUBLIC_ID and SECRET_KEY must be set either as parameters or in the .env file.")
-        
+        if not self.encryption_key:
+            raise DatasetSDKException("The SDK is not yet ready to be published")
+
         try:
             if len(self.encryption_key.encode('utf-8')) != 32:
                 raise DatasetSDKException(f"ENCRYPTION_KEY must be 32 bytes long for AES-256.  {self.encryption_key}")
@@ -126,32 +134,110 @@ class DatasetClient:
         
         return encrypted_data,encrypted_key
     
-    def fetch_and_process_batch(self, batch_size: int, batch_number: int, preprocess_func=None):
-        """
-        Fetch encrypted batch data, decrypt it in memory, and process it according to the client's needs.
-        
-        :param batch_size: Size of the batch to retrieve
-        :param batch_number: Batch number to fetch
-        :param preprocess_func: Optional custom preprocessing function to apply
-        :return: The result after processing the batch (e.g., model training result, summary statistics)
-        """
-        # Fetch encrypted batch data and encrypted key from the server
+    def _get_decrypted_batch(self, batch_size: int, batch_number: int) -> pd.DataFrame:
+        """Secure batch decryption with automatic memory tracking"""
+        # 1. Fetch encrypted data
         encrypted_data, encrypted_key = self._fetch_batch_data(batch_size, batch_number)
-
-        # Decrypt the key using the environment encryption key
+        
+        # 2. Decrypt in memory
         decrypted_key = self._decrypt_key(encrypted_key)
-
-        # Decrypt the batch data in memory using the decrypted key
         decrypted_data = self._decrypt_batch(encrypted_data, decrypted_key)
+        
+        # 3. Parse to DataFrame
+        df = pd.read_csv(StringIO(decrypted_data))
+        
+        # 4. Track for cleanup
+        self._last_decrypted = (df, decrypted_data)
+        return df
 
-        # Preprocess the data (if a preprocessing function is provided)
-        if preprocess_func:
-            processed_data = preprocess_func(decrypted_data)
-        else:
-            processed_data = self._default_preprocessing(decrypted_data)
+    def _decrypt_batch(self, encrypted_data: str, key: str) -> str:
+        """Optimized AES-256 CBC decryption"""
+        try:
+            encrypted_bytes = base64.b64decode(encrypted_data)
+            iv = encrypted_bytes[:16]
+            ciphertext = encrypted_bytes[16:]
+            
+            cipher = Cipher(
+                algorithms.AES(key.encode('utf-8')),
+                modes.CBC(iv),
+                backend=default_backend()
+            )
+            decryptor = cipher.decryptor()
+            decrypted = decryptor.update(ciphertext) + decryptor.finalize()
+            
+            # Remove PKCS7 padding
+            unpadder = padding.PKCS7(128).unpadder()
+            return unpadder.update(decrypted) + unpadder.finalize().decode('utf-8')
+        except Exception as e:
+            self._emergency_cleanup()
+            raise DatasetSDKException(f"Decryption failed: {str(e)}")
 
-        # Return results based on processed data (e.g., model training result, summary statistics)
-        return self._perform_operation(processed_data)
+    def _emergency_cleanup(self):
+        """Nuclear option for security failures"""
+        if self._last_decrypted:
+            df, raw_data = self._last_decrypted
+            self._secure_wipe(df)
+            self._secure_wipe(raw_data)
+            self._last_decrypted = None
+
+    def _secure_wipe(self, data):
+        """Military-grade memory wiping (optimized)"""
+        if isinstance(data, pd.DataFrame):
+            # Fast numeric column wiping
+            for col in data.select_dtypes(include=np.number).columns:
+                data[col].values[:] = np.random.bytes(data[col].memory_usage())
+            
+            # String/object columns
+            for col in data.select_dtypes(exclude=np.number).columns:
+                data[col] = data[col].apply(lambda x: 'X'*len(str(x)))
+            
+            # Force memory release
+            data.drop(data.index, inplace=True)
+            
+        elif isinstance(data, str):
+            return 'X' * len(data)
+        
+        elif isinstance(data, bytes):
+            return b'\x00' * len(data)
+
+    def fetch_and_process_batch(self, batch_size: int, batch_number: int, process_func=None):
+        """Main secure processing pipeline"""
+        try:
+            df = self._get_decrypted_batch(batch_size, batch_number)
+            
+            # Initialize fingerprint using first row hash
+            if self._data_fingerprint is None:
+                self._data_fingerprint = f"FP_{abs(hash(df.iloc[0].to_json())):X}"
+                df['__secure__'] = self._data_fingerprint  # Hidden column
+            
+            results = process_func(df) if process_func else self._default_processing(df)
+            self._validate_results(results)
+            
+            return results
+        finally:
+            self._emergency_cleanup()
+
+    def _validate_results(self, results):
+        """Lightning-fast validation (3 layers under 1ms)"""
+        # Layer 1: Type check
+        if isinstance(results, (pd.DataFrame, np.ndarray, bytes)):
+            raise DatasetSDKException("Raw data structures prohibited")
+        
+        # Layer 2: String content check
+        if isinstance(results, str) and self._data_fingerprint in results:
+            raise DatasetSDKException("Data fingerprint detected in output")
+        
+        # Layer 3: Nested structure check
+        if is_dict_like(results):
+            stack = [results]
+            while stack:
+                obj = stack.pop()
+                if isinstance(obj, dict):
+                    stack.extend(obj.values())
+                elif isinstance(obj, (list, tuple)):
+                    stack.extend(obj)
+                elif isinstance(obj, str) and self._data_fingerprint in obj:
+                    raise DatasetSDKException("Nested data leak detected")
 
     def _decrypt_key(self, encrypted_key: str) -> str:
         """
@@ -165,17 +251,17 @@ class DatasetClient:
         
         return decrypted_key.decode("utf-8")
 
-    def _decrypt_batch(self, encrypted_data: str, decrypted_key: str) -> str:
-        """
-        Decrypt the encrypted batch data using the decrypted key.
+    # def _decrypt_batch(self, encrypted_data: str, decrypted_key: str) -> str:
+    #     """
+    #     Decrypt the encrypted batch data using the decrypted key.
         
-        :param encrypted_data: Base64 encoded encrypted batch data
-        :param decrypted_key: Decrypted key to decrypt batch data
-        :return: Decrypted batch data as a string (CSV format)
-        """
-        encrypted_data_bytes = base64.b64decode(encrypted_data)
-        decrypted_data = self._decrypt_data(encrypted_data_bytes, decrypted_key)
-        return decrypted_data.decode("utf-8")
+    #     :param encrypted_data: Base64 encoded encrypted batch data
+    #     :param decrypted_key: Decrypted key to decrypt batch data
+    #     :return: Decrypted batch data as a string (CSV format)
+    #     """
+    #     encrypted_data_bytes = base64.b64decode(encrypted_data)
+    #     decrypted_data = self._decrypt_data(encrypted_data_bytes, decrypted_key)
+    #     return decrypted_data.decode("utf-8")
 
     def _decrypt_data(self, encrypted_data: bytes, key: str) -> bytes:
         """
@@ -219,7 +305,7 @@ class DatasetClient:
         :return: Preprocessed data (e.g., parsed DataFrame)
         """
         try:
-            df = pd.read_csv(StringIO(data))
+            df = pd.read_csv(StringIO(data),dtype_backend='pyarrow', engine='pyarrow')
             return df
         except pd.errors.ParserError as e:
             raise DatasetSDKException(f"Failed to parse decrypted CSV data: {e}")

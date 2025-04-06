@@ -1,6 +1,7 @@
 setup.py
 kusa/__init__.py
 kusa/client.py
+kusa/config.py
 kusa/exceptions.py
 kusa/kusaSdk.py
 kusa/utils.py

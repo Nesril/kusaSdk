@@ -13,10 +13,12 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.backends import default_backend
 from pathlib import Path
 from kusa.config import Config
+import numpy as np
+from pandas.api.types import is_dict_like
 
 
 BASE_URL = Config.get_base_url()
-ENCRYPTION_KEY = Config.get_encryption_key()
+ENCRYPTION_KEY = "R@BrG8XQh1A6d%%PZz5Uh0P$YeouD4Z*"
 
 class DatasetClient:
     def __init__(self, public_id=None, secret_key=None, base_url=None):
@@ -48,7 +50,7 @@ class DatasetClient:
         except:
             raise DatasetSDKException(f"ENCRYPTION_KEY must be 32 bytes long for AES-256. {self.encryption_key}")
         # Debug statement (remove or comment out in production)
-        print(f"Encryption Key Loaded: {self.encryption_key}")
+
         self.headers = {
             "Authorization": f"key {self.secret_key}"
         }
@@ -167,7 +169,9 @@ class DatasetClient:
             
             # Remove PKCS7 padding
             unpadder = padding.PKCS7(128).unpadder()
-            return unpadder.update(decrypted) + unpadder.finalize().decode('utf-8')
+            decrypted_data = unpadder.update(decrypted) + unpadder.finalize()
+            return decrypted_data.decode('utf-8')  # now it's fully decoded after unpadding
+
         except Exception as e:
             self._emergency_cleanup()
             raise DatasetSDKException(f"Decryption failed: {str(e)}")
@@ -271,7 +275,6 @@ class DatasetClient:
         :param key: Key used to decrypt the data
         :return: Decrypted data (bytes)
         """
-        print(key)
         if not key:
          raise ValueError("Key cannot be None")
         try:

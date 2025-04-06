@@ -3,7 +3,7 @@ Name: kusa
 Version: 0.1.6
 Summary: SDK for accessing purchased datasets
 Author: HAWD Techs
-Author-email: haws@gmail.com
+Author-email: hawd@gmail.com
 Requires-Python: >=3.6
 Requires-Dist: requests
 Requires-Dist: pandas

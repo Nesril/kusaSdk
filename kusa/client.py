@@ -1,325 +1,272 @@
-# kusa/client.py
-
-import pandas as pd
-from io import StringIO
-from .utils import make_request
-from .exceptions import DatasetSDKException
 import os
-from dotenv import load_dotenv, find_dotenv
 import json
 import base64
+import pandas as pd
+import numpy as np
+
+from io import StringIO
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.backends import default_backend
-from pathlib import Path
+
 from kusa.config import Config
-import numpy as np
-from pandas.api.types import is_dict_like
+from kusa.utils import make_request
+from kusa.exceptions import DatasetSDKException
 
+from sklearn.decomposition import PCA
+from sklearn.feature_extraction.text import TfidfVectorizer
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+import joblib
 
-BASE_URL = Config.get_base_url()
-ENCRYPTION_KEY = "R@BrG8XQh1A6d%%PZz5Uh0P$YeouD4Z*"
+class SecureDatasetClient:
+    def __init__(self, public_id=None, secret_key=None, encryption_key=None):
+        self.public_id = public_id or os.getenv("PUBLIC_ID")
+        self.secret_key = secret_key or os.getenv("SECRET_KEY")
+        self.encryption_key = encryption_key or Config.get_encryption_key()
+        self.base_url = Config.get_base_url()
 
-class DatasetClient:
-    def __init__(self, public_id=None, secret_key=None, base_url=None):
-        """
-        Initializes the DatasetClient with authentication details.
+        self.__raw_df = None      # Private memory store for raw data
+        self.__processed = None   # Private memory for preprocessed
+        self.__metadata = {}
 
-        Args:
-            public_id (str, optional): Public ID of the dataset. If not provided, fetched from environment.
-            secret_key (str, optional): Secret key for authorization. If not provided, fetched from environment.
-            base_url (str, optional): Base URL of the dataset server. If not provided, fetched from environment.
-        """
-        self.public_id = public_id 
-        self.secret_key = secret_key
-        self.base_url = BASE_URL
-        self.encryption_key = ENCRYPTION_KEY
-        self._data_fingerprint = None  # Lazy initialization
-        self._last_decrypted = None    # For emergency cleanup
+        self._validate_keys()
+        self.headers = self._build_headers()
         
-        print(BASE_URL," encryption_key ",ENCRYPTION_KEY)
+        self.__trained_model = None
+        self.__X_val = None
+        self.__y_val = None
 
+    def _validate_keys(self):
         if not self.public_id or not self.secret_key:
-            raise DatasetSDKException("PUBLIC_ID and SECRET_KEY must be set either as parameters or in the .env file.")
-        if not self.encryption_key:
-            raise DatasetSDKException("The SDK is not yet ready to be published")
+            raise DatasetSDKException("Missing PUBLIC_ID or SECRET_KEY.")
+        if not self.encryption_key or len(self.encryption_key.encode()) != 32:
+            raise DatasetSDKException("ENCRYPTION_KEY must be 32 bytes (AES-256).")
 
-        try:
-            if len(self.encryption_key.encode('utf-8')) != 32:
-                raise DatasetSDKException(f"ENCRYPTION_KEY must be 32 bytes long for AES-256.  {self.encryption_key}")
-        except:
-            raise DatasetSDKException(f"ENCRYPTION_KEY must be 32 bytes long for AES-256. {self.encryption_key}")
-        # Debug statement (remove or comment out in production)
-
-        self.headers = {
+    def _build_headers(self):
+        return {
             "Authorization": f"key {self.secret_key}"
         }
 
     def initialize(self):
-        """
-        Initializes the dataset by fetching total rows and the first 10 rows.
-
-        Returns:
-            dict: Contains 'totalRows' and 'first10Rows' as a pandas DataFrame.
-        """
+        """Initializes metadata and preview without exposing raw data."""
         url = f"{self.base_url}/initialize/{self.public_id}"
         data = make_request(url, headers=self.headers)
-        
-        total_rows = data.get("totalRows")
-        first10Rows_str = data.get("first10Rows")
-        
-        if not first10Rows_str:
-            raise DatasetSDKException("Initialization failed: 'first10Rows' is missing or empty.")
-        
-        try:
-            # Use StringIO to convert the CSV string into a file-like object
-            first_10_rows = pd.read_csv(StringIO(first10Rows_str))
-        except pd.errors.ParserError as e:
-            raise DatasetSDKException(f"Failed to parse 'first10Rows' CSV data: {e}")
-        
-        if total_rows is None or first_10_rows.empty:
-            raise DatasetSDKException("Initialization failed: Invalid response from server.")
-        
+
+        self.__metadata = {
+            "totalRows": data.get("totalRows", 0),
+            "columns": data.get("columns", []),
+            "first10Rows":pd.read_csv(StringIO(data["first10Rows"]))
+        }
+
+        preview_df = pd.read_csv(StringIO(data["first10Rows"]))
+        print("Sdk initialized successfuly !! ")
         return {
-            "totalRows": total_rows,
-            "first10Rows": first_10_rows
+            "preview": preview_df.head(10),
+            "metadata": self.__metadata
         }
 
-    def fetch_batch(self, batch_size, batch_number):
-        """
-        Fetches a specific batch of data.
+    def fetch_and_decrypt_batch(self, batch_size=500, batch_number=0):
+        """Fetches and securely decrypts data internally only."""
 
-        Args:
-            batch_size (int): Number of samples per batch.
-            batch_number (int): The batch number to fetch (1-based index).
-
-        Returns:
-            pandas.DataFrame: The fetched batch of data.
-        """
-        url = f"{self.base_url}/get/{self.public_id}/batch"
-        params = {
-            "batchSize": batch_size,
-            "batchNumber": batch_number
-        }
-        data = make_request(url, headers=self.headers, params=params)
-        
-        batch_data_str = data.get("batchData")
-        
-        if not batch_data_str:
-            raise DatasetSDKException(f"No data found for batch number {batch_number}.")
-        
-        try:
-            # Convert the CSV string to a DataFrame
-            batch_data = pd.read_csv(StringIO(batch_data_str))
-        except pd.errors.ParserError as e:
-            raise DatasetSDKException(f"Failed to parse 'batchData' CSV data: {e}")
-        
-        if batch_data.empty:
-            raise DatasetSDKException(f"No data found for batch number {batch_number}.")
-        
-        return batch_data
-
-    def _fetch_batch_data(self, batch_size, batch_number):
+        if not self.__metadata:
+          raise DatasetSDKException("Initialization is required")
+          return
       
         url = f"{self.base_url}/get/{self.public_id}/encryptbatch"
         params = {
             "batchSize": batch_size,
             "batchNumber": batch_number
         }
+
         data = make_request(url, headers=self.headers, params=params)
-        
-        encrypted_data = data.get("batchData")
-        encrypted_key = data.get("encryptedKey")
-        
-        if not encrypted_data or not encrypted_key:
-            raise DatasetSDKException(f"No data found for batch number {batch_number}.")
-        
-        return encrypted_data,encrypted_key
+
+        encrypted_data = base64.b64decode(data["batchData"])
+        encrypted_key = base64.b64decode(data["encryptedKey"])
+
+        symmetric_key = self._decrypt_data(encrypted_key, self.encryption_key.encode()).decode()
+        raw_csv = self._decrypt_data(encrypted_data, symmetric_key.encode()).decode()
+
+        df = pd.read_csv(StringIO(raw_csv))
+        self.__raw_df = df.copy()  # Raw data never exposed
+        return True  # Indicate internal load complete
+
+    def _decrypt_data(self, encrypted_bytes: bytes, key: bytes) -> bytes:
+        iv = encrypted_bytes[:16]
+        ciphertext = encrypted_bytes[16:]
+
+        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+        padded = decryptor.update(ciphertext) + decryptor.finalize()
+
+        unpadder = padding.PKCS7(128).unpadder()
+        return unpadder.update(padded) + unpadder.finalize()
     
-    def _get_decrypted_batch(self, batch_size: int, batch_number: int) -> pd.DataFrame:
-        """Secure batch decryption with automatic memory tracking"""
-        # 1. Fetch encrypted data
-        encrypted_data, encrypted_key = self._fetch_batch_data(batch_size, batch_number)
-        
-        # 2. Decrypt in memory
-        decrypted_key = self._decrypt_key(encrypted_key)
-        decrypted_data = self._decrypt_batch(encrypted_data, decrypted_key)
-        
-        # 3. Parse to DataFrame
-        df = pd.read_csv(StringIO(decrypted_data))
-        
-        # 4. Track for cleanup
-        self._last_decrypted = (df, decrypted_data)
-        return df
+    # run preprocessing ( phase 2)
+    # sdk.configure_preprocessing({
+    #     "reduction": "pca",
+    #     "n_components": 3,
+    #     "tokenizer": "nltk",
+    #     "stopwords": True,
+    # })
+    # sdk.run_preprocessing()
 
-    def _decrypt_batch(self, encrypted_data: str, key: str) -> str:
-        """Optimized AES-256 CBC decryption"""
+    def configure_preprocessing(self, config: dict):
+        """Allow user to provide config for internal preprocessing."""
+        self.__preprocessing_config = config or {}
+
+    def ensure_nltk_tokenizer_resources(self):
+        """Securely verify and download required NLTK resources"""
         try:
-            encrypted_bytes = base64.b64decode(encrypted_data)
-            iv = encrypted_bytes[:16]
-            ciphertext = encrypted_bytes[16:]
-            
-            cipher = Cipher(
-                algorithms.AES(key.encode('utf-8')),
-                modes.CBC(iv),
-                backend=default_backend()
-            )
-            decryptor = cipher.decryptor()
-            decrypted = decryptor.update(ciphertext) + decryptor.finalize()
-            
-            # Remove PKCS7 padding
-            unpadder = padding.PKCS7(128).unpadder()
-            decrypted_data = unpadder.update(decrypted) + unpadder.finalize()
-            return decrypted_data.decode('utf-8')  # now it's fully decoded after unpadding
-
+            # List of required NLTK resources
+            resources = ['punkt', 'punkt_tab', 'stopwords']
+            for res in resources:
+                try:
+                    # Check if the resource is already available
+                    nltk.data.find(f'tokenizers/{res}' if res.startswith('punkt') else f'corpora/{res}')
+                except LookupError:
+                    # Download the resource if not found
+                    nltk.download(res, quiet=True)
         except Exception as e:
             self._emergency_cleanup()
-            raise DatasetSDKException(f"Decryption failed: {str(e)}")
+            raise DatasetSDKException(f"Resource verification failed: {str(e)}")
 
-    def _emergency_cleanup(self):
-        """Nuclear option for security failures"""
-        if self._last_decrypted:
-            df, raw_data = self._last_decrypted
-            self._secure_wipe(df)
-            self._secure_wipe(raw_data)
-            self._last_decrypted = None
-
-    def _secure_wipe(self, data):
-        """Military-grade memory wiping (optimized)"""
-        if isinstance(data, pd.DataFrame):
-            # Fast numeric column wiping
-            for col in data.select_dtypes(include=np.number).columns:
-                data[col].values[:] = np.random.bytes(data[col].memory_usage())
-            
-            # String/object columns
-            for col in data.select_dtypes(exclude=np.number).columns:
-                data[col] = data[col].apply(lambda x: 'X'*len(str(x)))
-            
-            # Force memory release
-            data.drop(data.index, inplace=True)
-            
-        elif isinstance(data, str):
-            return 'X' * len(data)
+    def run_preprocessing(self):
+        """Internal pipeline: clean → reduce → transform → store"""
+        if self.__raw_df is None:
+            raise DatasetSDKException("Raw dataset not loaded. Fetch a batch first.")
         
-        elif isinstance(data, bytes):
-            return b'\x00' * len(data)
+        df = self.__raw_df.copy()
+        target_column = self.__preprocessing_config.get("target_column", None)
 
-    def fetch_and_process_batch(self, batch_size: int, batch_number: int, process_func=None):
-        """Main secure processing pipeline"""
-        try:
-            df = self._get_decrypted_batch(batch_size, batch_number)
-            
-            # Initialize fingerprint using first row hash
-            if self._data_fingerprint is None:
-                self._data_fingerprint = f"FP_{abs(hash(df.iloc[0].to_json())):X}"
-                df['__secure__'] = self._data_fingerprint  # Hidden column
-            
-            results = process_func(df) if process_func else self._default_processing(df)
-            self._validate_results(results)
-            
-            return results
-        finally:
-            self._emergency_cleanup()
+        if target_column and target_column not in df.columns:
+            raise DatasetSDKException(f"Target column '{target_column}' not found in data.")
 
-    def _validate_results(self, results):
-        """Lightning-fast validation (3 layers under 1ms)"""
-        # Layer 1: Type check
-        if isinstance(results, (pd.DataFrame, np.ndarray, bytes)):
-            raise DatasetSDKException("Raw data structures prohibited")
+        # Store label column separately
+        if target_column:
+            y = df[target_column]
+            df = df.drop(columns=[target_column])
+        else:
+            y = None
+
+        # Text preprocessing
+        for col in df.select_dtypes(include=["object"]).columns:
+            df[col] = df[col].astype(str)
+            if self.__preprocessing_config.get("tokenizer") == "nltk":
+                self.ensure_nltk_tokenizer_resources()
+                df[col] = df[col].apply(word_tokenize)
+
+                if self.__preprocessing_config.get("stopwords"):
+                    stop_words = set(stopwords.words("english"))
+                    df[col] = df[col].apply(lambda tokens: [w for w in tokens if w.lower() not in stop_words])
+
+                # Join tokens back into string for TF-IDF or downstream steps
+                df[col] = df[col].apply(lambda tokens: " ".join(tokens))
+
+        # Feature reduction
+        if self.__preprocessing_config.get("reduction") == "pca":
+            n_components = self.__preprocessing_config.get("n_components", 2)
+            numeric_df = df.select_dtypes(include=[np.number])
+            numeric_df = numeric_df.dropna(axis=1)  # Drop NaNs for PCA
+
+            scaler = StandardScaler()
+            scaled = scaler.fit_transform(numeric_df)
+
+            pca = PCA(n_components=n_components)
+            reduced = pca.fit_transform(scaled)
+
+            for i in range(n_components):
+                df[f"pca_{i+1}"] = reduced[:, i]
+
+        elif self.__preprocessing_config.get("reduction") == "tfidf":
+            vectorizer = TfidfVectorizer()
+            tfidf_df_list = []
+            for col in df.select_dtypes(include=["object"]).columns:
+                tfidf_matrix = vectorizer.fit_transform(df[col])
+                tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=vectorizer.get_feature_names_out())
+                tfidf_df.columns = [f"{col}_tfidf_{c}" for c in tfidf_df.columns]
+                tfidf_df_list.append(tfidf_df)
+
+            df = pd.concat(tfidf_df_list, axis=1)
+
+        # Restore label column
+        if y is not None:
+            df[target_column] = y.reset_index(drop=True)
+
+        self.__processed = df
+
+
+    # 🧠 Phase 3: Model Training Framework
+    # def my_model(X, y, **params):
+    #     # Train a model here
+    #     model = SomeModel(**params)
+    #     model.fit(X, y)
+    #     return model
+
+    # sdk.train(my_model, {
+    #     "learning_rate": 0.01,
+    #     "epochs": 10
+    # })
+
+    def train(self, user_train_func, hyperparams: dict = None, target_column: str = None):
+            """User passes in their training function, SDK internally calls it with processed data."""
+
+            print("here ",self.__processed)
+            if self.__processed is None:
+                raise DatasetSDKException("No processed data available. Run preprocessing first.")
+
+            if target_column is None or target_column not in self.__processed.columns:
+                raise DatasetSDKException(f"Invalid or missing target_column: '{target_column}'.")
+
+            # Internal train-test split
+            X = self.__processed.drop(columns=[target_column])
+            y = self.__processed[target_column]
+
+            print("x=>> ",X)
+            print("y=>> ",y )
+            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+            # Call the user's training function with internal data
+            model = user_train_func(X_train, y_train, **(hyperparams or {}))
+            self.__trained_model = model
+            self.__X_val = X_val
+            self.__y_val = y_val
+            print("Class counts:\n", y.value_counts())
+
+            return model
         
-        # Layer 2: String content check
-        if isinstance(results, str) and self._data_fingerprint in results:
-            raise DatasetSDKException("Data fingerprint detected in output")
-        
-        # Layer 3: Nested structure check
-        if is_dict_like(results):
-            stack = [results]
-            while stack:
-                obj = stack.pop()
-                if isinstance(obj, dict):
-                    stack.extend(obj.values())
-                elif isinstance(obj, (list, tuple)):
-                    stack.extend(obj)
-                elif isinstance(obj, str) and self._data_fingerprint in obj:
-                    raise DatasetSDKException("Nested data leak detected")
+    def evaluate(self):
+        if self.__trained_model is None or self.__X_val is None:
+            raise DatasetSDKException("No trained model or validation data available.")
 
-    def _decrypt_key(self, encrypted_key: str) -> str:
-        """
-        Decrypt the encrypted key using the environment's encryption key.
-        
-        :param encrypted_key: Base64 encoded encrypted key
-        :return: Decrypted key as a string
-        """
-        encrypted_key_bytes = base64.b64decode(encrypted_key)
-        decrypted_key = self._decrypt_data(encrypted_key_bytes, self.encryption_key)
-        
-        return decrypted_key.decode("utf-8")
+        preds = self.__trained_model.predict(self.__X_val)
+        accuracy = accuracy_score(self.__y_val, preds)
+        report = classification_report(self.__y_val, preds)
 
-    # def _decrypt_batch(self, encrypted_data: str, decrypted_key: str) -> str:
-    #     """
-    #     Decrypt the encrypted batch data using the decrypted key.
-        
-    #     :param encrypted_data: Base64 encoded encrypted batch data
-    #     :param decrypted_key: Decrypted key to decrypt batch data
-    #     :return: Decrypted batch data as a string (CSV format)
-    #     """
-    #     encrypted_data_bytes = base64.b64decode(encrypted_data)
-    #     decrypted_data = self._decrypt_data(encrypted_data_bytes, decrypted_key)
-    #     return decrypted_data.decode("utf-8")
+        return {
+            "accuracy": accuracy,
+            "report": report
+        }
 
-    def _decrypt_data(self, encrypted_data: bytes, key: str) -> bytes:
-        """
-        Internal method to handle decryption logic for batch data and keys.
-        
-        :param encrypted_data: Encrypted data (bytes)
-        :param key: Key used to decrypt the data
-        :return: Decrypted data (bytes)
-        """
-        if not key:
-         raise ValueError("Key cannot be None")
-        try:
-            # Convert key to bytes
-            key_bytes = key.encode('utf-8')
-            if len(key_bytes) != 32:
-                raise DatasetSDKException("Invalid key length. Key must be 32 bytes for AES-256.")
+    def predict(self, input_data):
+        if self.__trained_model is None:
+            raise DatasetSDKException("Model not trained or loaded.")
 
-            # Extract IV and ciphertext
-            iv = encrypted_data[:16]
-            ciphertext = encrypted_data[16:]
+        return self.__trained_model.predict(input_data)
 
-            # Initialize cipher
-            cipher = Cipher(algorithms.AES(key_bytes), modes.CBC(iv), backend=default_backend())
-            decryptor = cipher.decryptor()
-            decrypted_padded = decryptor.update(ciphertext) + decryptor.finalize()
+    def save_model(self, filepath: str):
+        if self.__trained_model is None:
+            raise DatasetSDKException("No trained model to save.")
 
-            # Unpad the decrypted data
-            unpadder = padding.PKCS7(128).unpadder()
-            decrypted_data = unpadder.update(decrypted_padded) + unpadder.finalize()
+        joblib.dump(self.__trained_model, filepath)
+        print("\n🚀 Model training and evaluation completed securely.")
 
-            return decrypted_data
-        except Exception as e:
-            raise DatasetSDKException(f"Decryption failed: {e}")
+    def load_model(self, filepath: str):
+        if not os.path.exists(filepath):
+            raise DatasetSDKException(f"No model found at: {filepath}")
 
-    def _default_preprocessing(self, data: str) -> pd.DataFrame:
-        """
-        Internal method for default preprocessing of decrypted data.
-        
-        :param data: Decrypted CSV data
-        :return: Preprocessed data (e.g., parsed DataFrame)
-        """
-        try:
-            df = pd.read_csv(StringIO(data),dtype_backend='pyarrow', engine='pyarrow')
-            return df
-        except pd.errors.ParserError as e:
-            raise DatasetSDKException(f"Failed to parse decrypted CSV data: {e}")
-
-    def _perform_operation(self, processed_data: pd.DataFrame):
-        """
-        Internal method to perform the operation requested by the client.
-        The client never gets access to the decrypted data, only the result.
-        
-        :param processed_data: Data after preprocessing (pandas DataFrame)
-        :return: The processed DataFrame or summary statistics
-        """
-        # Example: Return the DataFrame
-        return processed_data
+        self.__trained_model = joblib.load(filepath)

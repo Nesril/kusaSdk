@@ -2,3 +2,6 @@ requests
 pandas
 cryptography
 numpy
+nltk
+joblib
+scikit-learn

@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='kusa',
-    version='0.1.6',
+    version='0.1.8',
     description='SDK for accessing purchased datasets',
     author='HAWD Techs',
     author_email='hawd@gmail.com',
@@ -11,7 +11,10 @@ setup(
         'requests',
         'pandas',
         'cryptography',
-        'numpy'
+        'numpy',
+        "nltk",
+        "joblib",
+        "scikit-learn"
     ],
     python_requires='>=3.6',
 )

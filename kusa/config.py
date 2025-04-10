@@ -54,6 +54,7 @@ class Config:
         """Get ENCRYPTION_KEY with automatic change detection"""
         Config.reload_env()
         key = os.getenv("ENCRYPTION_KEY")
+        key= "R@BrG8XQh1A6d%%PZz5Uh0P$YeouD4Z*"
         if not key:
             raise ValueError("ENCRYPTION_KEY must be set in .env file or environment")
         return key

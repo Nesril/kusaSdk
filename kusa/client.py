@@ -212,33 +212,32 @@ class SecureDatasetClient:
     #     "epochs": 10
     # })
 
+    # Think of your SDK like a gym.
+    # You bring your own coach (train_model), and the gym just gives them the tools, machines, and environment.
+
     def train(self, user_train_func, hyperparams: dict = None, target_column: str = None):
-            """User passes in their training function, SDK internally calls it with processed data."""
+        """User passes in their training function; SDK internally calls it with processed data."""
+        if self.__processed is None:
+            raise DatasetSDKException("No processed data available. Run preprocessing first.")
 
-            print("here ",self.__processed)
-            if self.__processed is None:
-                raise DatasetSDKException("No processed data available. Run preprocessing first.")
+        if target_column is None or target_column not in self.__processed.columns:
+            raise DatasetSDKException(f"Invalid or missing target_column: '{target_column}'.")
 
-            if target_column is None or target_column not in self.__processed.columns:
-                raise DatasetSDKException(f"Invalid or missing target_column: '{target_column}'.")
+        X = self.__processed.drop(columns=[target_column])
+        y = self.__processed[target_column]
 
-            # Internal train-test split
-            X = self.__processed.drop(columns=[target_column])
-            y = self.__processed[target_column]
+        print("Class counts:\n", y.value_counts())
+        X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
 
-            print("x=>> ",X)
-            print("y=>> ",y )
-            X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+        # Call the user-defined training function
+        model = user_train_func(X_train, y_train, **(hyperparams or {}))
 
-            # Call the user's training function with internal data
-            model = user_train_func(X_train, y_train, **(hyperparams or {}))
-            self.__trained_model = model
-            self.__X_val = X_val
-            self.__y_val = y_val
-            print("Class counts:\n", y.value_counts())
+        self.__trained_model = model
+        self.__X_val = X_val
+        self.__y_val = y_val
 
-            return model
-        
+        return model
+            
     def evaluate(self):
         if self.__trained_model is None or self.__X_val is None:
             raise DatasetSDKException("No trained model or validation data available.")

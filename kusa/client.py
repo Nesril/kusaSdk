@@ -22,6 +22,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report
 import joblib
+import re
+import spacy
+
 
 class SecureDatasetClient:
     def __init__(self, public_id=None, secret_key=None, encryption_key=None):
@@ -114,10 +117,42 @@ class SecureDatasetClient:
     #     "stopwords": True,
     # })
     # sdk.run_preprocessing()
+    
+    # ✅ This Now Supports:
+    # Custom text preprocessing (tokenizer, stopwords, lemmatization, etc.)
+
+    # TF-IDF and PCA feature reduction
+
+    # Clean future support for numpy/tensors
+
+    # Compatible with scikit-learn, TF, PyTorch, etc.
+
+
 
     def configure_preprocessing(self, config: dict):
-        """Allow user to provide config for internal preprocessing."""
-        self.__preprocessing_config = config or {}
+        """
+            Accepts user-defined preprocessing config.
+            Validates and stores it internally.
+        """
+        default_config = {
+            "tokenizer": "nltk",             # or 'spacy', 'split', 'none'
+            "stopwords": True,
+            "lowercase": True,
+            "remove_punctuation": True,
+            "lemmatize": False,
+            "reduction": "none",             # 'tfidf', 'pca', or 'none'
+            "n_components": 2,               # For PCA
+            "tfidf_max_features": 500,       # For TF-IDF
+            "target_column": None,
+            "output_format": "pandas"        # Can support tensor/numpy later
+        }
+        config = config or {}
+        for key in config:
+            if key not in default_config:
+                print(f"⚠️ Unknown config key: '{key}' – ignoring.")
+        # Merge with defaults
+        self.__preprocessing_config = {**default_config, **config}
+
 
     def ensure_nltk_tokenizer_resources(self):
         """Securely verify and download required NLTK resources"""
@@ -136,10 +171,11 @@ class SecureDatasetClient:
             raise DatasetSDKException(f"Resource verification failed: {str(e)}")
 
     def run_preprocessing(self):
-        """Internal pipeline: clean → reduce → transform → store"""
+        """Internal pipeline: clean → tokenize → reduce → store"""
+
         if self.__raw_df is None:
             raise DatasetSDKException("Raw dataset not loaded. Fetch a batch first.")
-        
+
         df = self.__raw_df.copy()
         target_column = self.__preprocessing_config.get("target_column", None)
 
@@ -153,25 +189,64 @@ class SecureDatasetClient:
         else:
             y = None
 
-        # Text preprocessing
-        for col in df.select_dtypes(include=["object"]).columns:
+
+        # Get all text columns (typically 'object' dtype)
+        text_cols = df.select_dtypes(include=["object"]).columns
+        for col in text_cols:
             df[col] = df[col].astype(str)
-            if self.__preprocessing_config.get("tokenizer") == "nltk":
+
+            # Step 1: Lowercase
+            if self.__preprocessing_config.get("lowercase", True):
+                df[col] = df[col].str.lower()
+
+            # Step 2: Remove punctuation
+            if self.__preprocessing_config.get("remove_punctuation", True):
+                df[col] = df[col].str.replace(r"[^\w\s]", "", regex=True)
+
+            # Step 3: Tokenization
+            tokenizer = self.__preprocessing_config.get("tokenizer", "nltk")
+            if tokenizer == "nltk":
                 self.ensure_nltk_tokenizer_resources()
                 df[col] = df[col].apply(word_tokenize)
+            elif tokenizer == "spacy":
+                nlp = spacy.load("en_core_web_sm")
+                df[col] = df[col].apply(lambda x: [token.text for token in nlp(x)])
+            elif tokenizer == "split":
+                df[col] = df[col].apply(lambda x: x.split())
+            elif tokenizer == "none":
+                df[col] = df[col].apply(lambda x: [x])
 
-                if self.__preprocessing_config.get("stopwords"):
-                    stop_words = set(stopwords.words("english"))
-                    df[col] = df[col].apply(lambda tokens: [w for w in tokens if w.lower() not in stop_words])
+            # Step 4: Stopword removal
+            if self.__preprocessing_config.get("stopwords", True):
+                stop_words = set(stopwords.words("english"))
+                df[col] = df[col].apply(lambda tokens: [w for w in tokens if w.lower() not in stop_words])
 
-                # Join tokens back into string for TF-IDF or downstream steps
-                df[col] = df[col].apply(lambda tokens: " ".join(tokens))
+            # Step 5: Lemmatization (if enabled and using spaCy)
+            if self.__preprocessing_config.get("lemmatize", False) and tokenizer == "spacy":
+                df[col] = df[col].apply(lambda tokens: [token.lemma_ for token in nlp(" ".join(tokens))])
 
-        # Feature reduction
-        if self.__preprocessing_config.get("reduction") == "pca":
+            # Step 6: Rejoin tokens back into string
+            df[col] = df[col].apply(lambda tokens: " ".join(tokens))
+
+        # ======================
+        # Feature Reduction
+        # ======================
+
+        reduction_type = self.__preprocessing_config.get("reduction", "none")
+
+        if reduction_type == "tfidf":
+            max_feats = self.__preprocessing_config.get("tfidf_max_features", 500)
+            vectorizer = TfidfVectorizer(max_features=max_feats)
+            for col in text_cols:
+                tfidf_matrix = vectorizer.fit_transform(df[col])
+                tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=[
+                    f"{col}_tfidf_{feat}" for feat in vectorizer.get_feature_names_out()
+                ])
+                df = df.drop(columns=[col]).join(tfidf_df)
+
+        elif reduction_type == "pca":
             n_components = self.__preprocessing_config.get("n_components", 2)
-            numeric_df = df.select_dtypes(include=[np.number])
-            numeric_df = numeric_df.dropna(axis=1)  # Drop NaNs for PCA
+            numeric_df = df.select_dtypes(include=[np.number]).dropna(axis=1)
 
             scaler = StandardScaler()
             scaled = scaler.fit_transform(numeric_df)
@@ -182,24 +257,18 @@ class SecureDatasetClient:
             for i in range(n_components):
                 df[f"pca_{i+1}"] = reduced[:, i]
 
-        elif self.__preprocessing_config.get("reduction") == "tfidf":
-            vectorizer = TfidfVectorizer()
-            tfidf_df_list = []
-            for col in df.select_dtypes(include=["object"]).columns:
-                tfidf_matrix = vectorizer.fit_transform(df[col])
-                tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=vectorizer.get_feature_names_out())
-                tfidf_df.columns = [f"{col}_tfidf_{c}" for c in tfidf_df.columns]
-                tfidf_df_list.append(tfidf_df)
-
-            df = pd.concat(tfidf_df_list, axis=1)
-
-        # Restore label column
         if y is not None:
             df[target_column] = y.reset_index(drop=True)
 
+        # Output format (default is pandas for now)
+        output_format = self.__preprocessing_config.get("output_format", "pandas")
+        if output_format != "pandas":
+            raise DatasetSDKException(f"Output format '{output_format}' is not supported yet.")
+
+        # Store processed data in memory
         self.__processed = df
 
-
+    
     # 🧠 Phase 3: Model Training Framework
     # def my_model(X, y, **params):
     #     # Train a model here
@@ -220,6 +289,7 @@ class SecureDatasetClient:
         if self.__processed is None:
             raise DatasetSDKException("No processed data available. Run preprocessing first.")
 
+        print(target_column not in self.__processed.columns,target_column,self.__processed.columns)
         if target_column is None or target_column not in self.__processed.columns:
             raise DatasetSDKException(f"Invalid or missing target_column: '{target_column}'.")
 
@@ -228,7 +298,9 @@ class SecureDatasetClient:
 
         print("Class counts:\n", y.value_counts())
         X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-
+        
+        
+        print("X_train ",X_train)
         # Call the user-defined training function
         model = user_train_func(X_train, y_train, **(hyperparams or {}))
 

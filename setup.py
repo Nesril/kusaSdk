@@ -6,6 +6,7 @@ setup(
     description='SDK for accessing purchased datasets',
     author='HAWD Techs',
     author_email='hawd@gmail.com',
+    python="3.12.5",
     packages=find_packages(),
     install_requires=[
         'requests',

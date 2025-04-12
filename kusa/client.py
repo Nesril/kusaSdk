@@ -39,6 +39,7 @@ class SecureDatasetClient:
         self.__raw_df = None      # Private memory store for raw data
         self.__processed = None   # Private memory for preprocessed
         self.__metadata = {}
+        self.__transformers={}
 
         self._validate_keys()
         self.headers = self._build_headers()
@@ -46,6 +47,7 @@ class SecureDatasetClient:
         self.__trained_model = None
         self.__X_val = None
         self.__y_val = None
+        
 
     def _validate_keys(self):
         if not self.public_id or not self.secret_key:
@@ -240,6 +242,8 @@ class SecureDatasetClient:
         reduction = config.get("reduction", "none")
 
         if reduction == "tfidf":
+            self.__transformers["tfidf_vectorizers"] = {}
+
             max_feats = config.get("tfidf_max_features", 500)
             vectorizer = TfidfVectorizer(max_features=max_feats)
 
@@ -250,6 +254,8 @@ class SecureDatasetClient:
                     columns=[f"{col}_tfidf_{w}" for w in vectorizer.get_feature_names_out()]
                 )
                 df = df.drop(columns=[col]).join(tfidf_df)
+                self.__transformers["tfidf_vectorizers"][col] = vectorizer # ✅ Save vectorizer
+            
 
         elif reduction == "pca":
             n_components = config.get("n_components", 2)
@@ -261,9 +267,13 @@ class SecureDatasetClient:
             pca = PCA(n_components=n_components)
             reduced = pca.fit_transform(scaled)
 
+            self.__transformers["pca"] = {
+                "scaler": scaler,
+                "pca": pca
+            }
             for i in range(n_components):
                 df[f"pca_{i+1}"] = reduced[:, i]
-
+    
         # ===============================
         # Target Encoding (Auto / Custom)
         # ===============================
@@ -328,6 +338,7 @@ class SecureDatasetClient:
             y = self.__processed[target_column]
 
             print("📊 Class counts:\n", y.value_counts())
+
             # Prepare train/val split
             stratify_y = y if task_type == "classification" else None
             X_train, X_val, y_train, y_val = train_test_split(
@@ -431,29 +442,62 @@ class SecureDatasetClient:
         else:
             raise DatasetSDKException(f"Unsupported task_type: '{self.__task_type}'")
 
+       
 
-    def predict(self, input_data):
-        print("__training_framework ",self.__training_framework)
+    def predict(self, input_df):
         if self.__trained_model is None:
             raise DatasetSDKException("Model not trained or loaded.")
 
-    
+        print("__transformers ",self.__transformers)
+
+        # ✅ Apply saved vectorizers
+        if "tfidf_vectorizers" in self.__transformers:
+           # Prepare input_df to match trained TF-IDF structure
+            all_cols = []
+
+            for col, vec in self.__transformers["tfidf_vectorizers"].items():
+                if col in input_df.columns:
+                    tfidf = vec.transform(input_df[col].astype(str))
+                    feature_names = [f"{col}_tfidf_{w}" for w in vec.get_feature_names_out()]
+                    tfidf_df = pd.DataFrame(tfidf.toarray(), columns=feature_names)
+
+                    # Save the column names for padding later
+                    all_cols.extend(feature_names)
+
+                    input_df = input_df.drop(columns=[col]).join(tfidf_df)
+
+            # Ensure consistent column order and fill missing ones
+            trained_cols = self.__trained_model.feature_names_in_  # sklearn sets this after .fit()
+
+            input_df = input_df.reindex(columns=trained_cols, fill_value=0)
+
+                    
+        elif "pca" in self.__transformers:
+            scaler = self.__transformers["pca"]["scaler"]
+            pca = self.__transformers["pca"]["pca"]
+
+            scaled = scaler.transform(input_df.select_dtypes(include=[np.number]))
+            reduced = pca.transform(scaled)
+
+            input_df = pd.DataFrame(reduced, columns=[f"pca_{i+1}" for i in range(reduced.shape[1])])
+
         try:
             if self.__training_framework == "sklearn":
-                return self.__trained_model.predict(input_data)
+                return self.__trained_model.predict(input_df)
 
             elif self.__training_framework == "tensorflow":
-                return (self.__trained_model.predict(input_data) > 0.5).astype("int32").flatten()
+                return (self.__trained_model.predict(input_df) > 0.5).astype("int32").flatten()
 
             elif self.__training_framework == "pytorch":
                 self.__trained_model.eval()
                 with torch.no_grad():
-                    inputs = torch.tensor(input_data.values, dtype=torch.float32)
+                    inputs = torch.tensor(input_df.values, dtype=torch.float32)
                     outputs = self.__trained_model(inputs)
                     return torch.argmax(outputs, dim=1).numpy()
 
             else:
                 raise DatasetSDKException(f"Unsupported framework: {self.__training_framework}")
+
         except Exception as e:
             raise DatasetSDKException(f"Prediction failed: {str(e)}")
 
@@ -477,7 +521,15 @@ class SecureDatasetClient:
         else:
             raise DatasetSDKException(f"Unsupported framework for saving: {self.__training_framework}")
 
-        print(f"\n✅ Model saved to: {filepath}")
+
+        # 🔐 Save vectorizers (if any)
+        if self.__transformers:
+            vec_path=f"{filepath}.transformers.pkl"
+            joblib.dump(self.__transformers, vec_path)
+            print(f"🧠 Saved transformers to: {vec_path}")
+            
+
+        print(f"✅ Model saved to: {filepath}")
 
 
     def load_model(self, filepath: str, training_framework: str) -> None:
@@ -519,3 +571,10 @@ class SecureDatasetClient:
                 
         except Exception as e:
             raise DatasetSDKException(f"Failed to load {training_framework} model: {str(e)}")
+        
+       # 🔁 Load vectorizers
+        vec_path = f"{filepath}.transformers.pkl"
+        if os.path.exists(vec_path):
+          self.__transformers = joblib.load(vec_path)
+          print(f"✅ Loaded vectorizers from: {vec_path}")
+

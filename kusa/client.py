@@ -47,6 +47,7 @@ class SecureDatasetClient:
         self.__trained_model = None
         self.__X_val = None
         self.__y_val = None
+        self.__input_feature_names = None
         
 
     def _validate_keys(self):
@@ -239,6 +240,11 @@ class SecureDatasetClient:
         # ===============================
         # Feature Reduction (TF-IDF / PCA)
         # ===============================
+        
+        # "reduction": "pca" → it applies only to numeric columns.
+        # "reduction": "tfidf" → it applies only to text columns.
+        # "reduction": "tfidf_pca" → they need to handle both separately (TF-IDF for text, then PCA for numeric).
+        
         reduction = config.get("reduction", "none")
 
         if reduction == "tfidf":
@@ -257,8 +263,43 @@ class SecureDatasetClient:
                 self.__transformers["tfidf_vectorizers"][col] = vectorizer # ✅ Save vectorizer
             
 
+        elif reduction == "tfidf_pca":
+            self.__transformers["tfidf_vectorizers"] = {}
+            tfidf_outputs = []
+            tfidf_feature_names = []
+
+            for col in text_cols:
+                vectorizer = TfidfVectorizer(max_features=config.get("tfidf_max_features", 500))
+                tfidf_matrix = vectorizer.fit_transform(df[col])
+                
+                self.__transformers["tfidf_vectorizers"][col] = vectorizer
+                tfidf_outputs.append(tfidf_matrix)
+                tfidf_feature_names += [f"{col}_tfidf_{feat}" for feat in vectorizer.get_feature_names_out()]
+
+            from scipy.sparse import hstack
+            combined_tfidf = hstack(tfidf_outputs).toarray()
+
+            # Apply PCA to combined TF-IDF
+            n_components = config.get("n_components", 2)
+            pca = PCA(n_components=n_components)
+            reduced_tfidf = pca.fit_transform(combined_tfidf)
+
+            self.__transformers["pca_tfidf"] = {
+                "pca": pca,
+                "tfidf_feature_names": tfidf_feature_names,
+                "pca_feature_names": [f"pca_tfidf_{i+1}" for i in range(n_components)]
+            }
+
+            # Numeric features (keep them)
+            df_numeric = df.select_dtypes(include=[np.number]).reset_index(drop=True)
+            df_reduced = pd.DataFrame(reduced_tfidf, columns=self.__transformers["pca_tfidf"]["pca_feature_names"])
+            df = pd.concat([df_numeric.reset_index(drop=True), df_reduced], axis=1)
+
+
         elif reduction == "pca":
             n_components = config.get("n_components", 2)
+
+            # Keep only numeric columns for PCA
             numeric_df = df.select_dtypes(include=[np.number]).dropna(axis=1)
 
             scaler = StandardScaler()
@@ -267,13 +308,24 @@ class SecureDatasetClient:
             pca = PCA(n_components=n_components)
             reduced = pca.fit_transform(scaled)
 
+            # ✅ Drop ALL non-numeric columns (object, datetime, etc.)
+            df = df.select_dtypes(include=[np.number])
+            df = df.drop(columns=numeric_df.columns)  # Drop numeric columns used in PCA
+
+            # ✅ Add PCA components
+            pca_feature_names = [f"pca_{i+1}" for i in range(n_components)]
+            print("pca_feature_names ",pca_feature_names)
+            for i, name in enumerate(pca_feature_names):
+                df[name] = reduced[:, i]
+
+            # ✅ Save transformer info
             self.__transformers["pca"] = {
                 "scaler": scaler,
-                "pca": pca
+                "pca": pca,
+                "trained_numeric_columns": numeric_df.columns.tolist(),
+                "trained_pca_feature_names": pca_feature_names
             }
-            for i in range(n_components):
-                df[f"pca_{i+1}"] = reduced[:, i]
-    
+         
         # ===============================
         # Target Encoding (Auto / Custom)
         # ===============================
@@ -347,7 +399,8 @@ class SecureDatasetClient:
 
             self.__training_framework = framework
             self.__task_type = task_type
-
+            self.__input_feature_names = X_train.columns.tolist()
+            
             model = None
 
             try:
@@ -394,6 +447,7 @@ class SecureDatasetClient:
             self.__trained_model = model
             self.__X_val = X_val
             self.__y_val = y_val
+            
 
             print("✅ Training complete.")
             return model
@@ -448,7 +502,15 @@ class SecureDatasetClient:
         if self.__trained_model is None:
             raise DatasetSDKException("Model not trained or loaded.")
 
-        print("__transformers ",self.__transformers)
+        print("self.__input_feature_names ",self.__input_feature_names)
+        # ✅ Ensure input is always a DataFrame (even if it's a Tensor)
+        if not isinstance(input_df, pd.DataFrame):
+            if isinstance(input_df, tf.Tensor):
+                input_df = pd.DataFrame(input_df.numpy(), columns=self.__input_feature_names)
+            elif isinstance(input_df, torch.Tensor):
+                input_df = pd.DataFrame(input_df.numpy(), columns=self.__input_feature_names)
+            else:
+                raise DatasetSDKException("Unsupported input type for prediction.")
 
         # ✅ Apply saved vectorizers
         if "tfidf_vectorizers" in self.__transformers:
@@ -467,19 +529,57 @@ class SecureDatasetClient:
                     input_df = input_df.drop(columns=[col]).join(tfidf_df)
 
             # Ensure consistent column order and fill missing ones
-            trained_cols = self.__trained_model.feature_names_in_  # sklearn sets this after .fit()
+            if self.__training_framework == "sklearn":
+                trained_cols = self.__trained_model.feature_names_in_  # sklearn sets this after .fit()
+            else:
+                trained_cols = self.__input_feature_names
+
 
             input_df = input_df.reindex(columns=trained_cols, fill_value=0)
 
                     
+        elif "pca_tfidf" in self.__transformers:
+            tfidf_vecs = self.__transformers["tfidf_vectorizers"]
+            tfidf_outputs = []
+
+            for col, vec in tfidf_vecs.items():
+                if col in input_df.columns:
+                    tfidf_matrix = vec.transform(input_df[col].astype(str))
+                    tfidf_outputs.append(tfidf_matrix)
+                else:
+                    # If missing column, fill with zeros
+                    tfidf_outputs.append(np.zeros((1, vec.max_features)))
+
+            from scipy.sparse import hstack
+            combined_tfidf = hstack(tfidf_outputs).toarray()
+
+            # Apply PCA
+            pca = self.__transformers["pca_tfidf"]["pca"]
+            reduced = pca.transform(combined_tfidf)
+            reduced_df = pd.DataFrame(reduced, columns=self.__transformers["pca_tfidf"]["pca_feature_names"])
+
+            # Include numeric columns if any
+            numeric_input = input_df.select_dtypes(include=[np.number])
+            input_df = pd.concat([numeric_input.reset_index(drop=True), reduced_df], axis=1)
+
         elif "pca" in self.__transformers:
             scaler = self.__transformers["pca"]["scaler"]
             pca = self.__transformers["pca"]["pca"]
 
-            scaled = scaler.transform(input_df.select_dtypes(include=[np.number]))
+            # Only scale numeric columns (just like training)
+            numeric_input = input_df.select_dtypes(include=[np.number]).dropna(axis=1)
+
+            # ⚠️ Handle missing columns if user omits any
+            trained_cols = self.__transformers["pca"].get("trained_numeric_columns", [])
+            numeric_input = numeric_input.reindex(columns=trained_cols, fill_value=0)
+
+            # Scale → Apply PCA
+            scaled = scaler.transform(numeric_input)
             reduced = pca.transform(scaled)
 
-            input_df = pd.DataFrame(reduced, columns=[f"pca_{i+1}" for i in range(reduced.shape[1])])
+            # input_df = pd.DataFrame(reduced, columns=[f"pca_{i+1}" for i in range(reduced.shape[1])])
+            input_df = pd.DataFrame(reduced, columns=self.__transformers["pca"]["trained_pca_feature_names"])
+
 
         try:
             if self.__training_framework == "sklearn":
@@ -506,13 +606,16 @@ class SecureDatasetClient:
         if self.__trained_model is None:
             raise DatasetSDKException("No trained model to save.")
 
+        # Ensure extension for TensorFlow
+        if self.__training_framework == "tensorflow":
+            if not filepath.endswith(".keras") and not filepath.endswith(".h5"):
+                filepath += ".keras"
+
+        # Save model
         if self.__training_framework == "sklearn":
             joblib.dump(self.__trained_model, filepath)
 
         elif self.__training_framework == "tensorflow":
-            # Ensure valid extension
-            if not filepath.endswith(".keras") and not filepath.endswith(".h5"):
-                filepath += ".keras"
             self.__trained_model.save(filepath)
 
         elif self.__training_framework == "pytorch":
@@ -521,60 +624,50 @@ class SecureDatasetClient:
         else:
             raise DatasetSDKException(f"Unsupported framework for saving: {self.__training_framework}")
 
-
-        # 🔐 Save vectorizers (if any)
-        if self.__transformers:
-            vec_path=f"{filepath}.transformers.pkl"
-            joblib.dump(self.__transformers, vec_path)
-            print(f"🧠 Saved transformers to: {vec_path}")
-            
-
+        # 🔐 Bundle and save transformers + input feature names
+        vec_path = f"{filepath}.bundle.pkl"
+        bundle = {
+            "transformers": self.__transformers,
+            "input_feature_names": self.__input_feature_names
+        }
+        joblib.dump(bundle, vec_path)
+        print(f"🧠 Saved preprocessing bundle to: {vec_path}")
         print(f"✅ Model saved to: {filepath}")
 
 
     def load_model(self, filepath: str, training_framework: str) -> None:
-        """Load a trained model from disk.
-        
-        Args:
-            filepath: Path to the saved model file
-            training_framework: Framework the model was trained with ("sklearn", "tensorflow", or "pytorch")
-        
-        Raises:
-            DatasetSDKException: If loading fails or framework is unsupported
-        """
-        if not training_framework:
-            raise DatasetSDKException("Training framework is required to load model")
-        
-        if not os.path.exists(filepath):
-            raise DatasetSDKException(f"No model found at: {filepath}")
-        
-        if training_framework not in ["pytorch", "tensorflow", "sklearn"]:
-            raise DatasetSDKException(f"Unsupported framework: {training_framework}. Must be 'pytorch', 'tensorflow', or 'sklearn'")
-        
-        self.__training_framework = training_framework
-        
-        try:
-            if training_framework == "sklearn":
-                self.__trained_model = joblib.load(filepath)
-                
-            elif training_framework == "tensorflow":
-                self.__trained_model = tf.keras.models.load_model(filepath)
-                
-            elif training_framework == "pytorch":
-                if self.__trained_model is None:
-                    raise DatasetSDKException(
-                        "For PyTorch, model architecture must be initialized before loading weights. "
-                        "Call initialize_pytorch_model() first or provide model architecture."
-                    )
-                self.__trained_model.load_state_dict(torch.load(filepath))
-                self.__trained_model.eval()
-                
-        except Exception as e:
-            raise DatasetSDKException(f"Failed to load {training_framework} model: {str(e)}")
-        
-       # 🔁 Load vectorizers
-        vec_path = f"{filepath}.transformers.pkl"
-        if os.path.exists(vec_path):
-          self.__transformers = joblib.load(vec_path)
-          print(f"✅ Loaded vectorizers from: {vec_path}")
+            if not training_framework:
+                raise DatasetSDKException("Training framework is required to load model.")
+            if not os.path.exists(filepath):
+                raise DatasetSDKException(f"No model found at: {filepath}")
+            if training_framework not in ["pytorch", "tensorflow", "sklearn"]:
+                raise DatasetSDKException(f"Unsupported framework: {training_framework}")
 
+            self.__training_framework = training_framework
+
+            try:
+                if training_framework == "sklearn":
+                    self.__trained_model = joblib.load(filepath)
+
+                elif training_framework == "tensorflow":
+                    self.__trained_model = tf.keras.models.load_model(filepath)
+
+                elif training_framework == "pytorch":
+                    if self.__trained_model is None:
+                        raise DatasetSDKException(
+                            "For PyTorch, model architecture must be initialized before loading weights. "
+                            "Call initialize_pytorch_model() first or provide model architecture."
+                        )
+                    self.__trained_model.load_state_dict(torch.load(filepath))
+                    self.__trained_model.eval()
+
+            except Exception as e:
+                raise DatasetSDKException(f"Failed to load {training_framework} model: {str(e)}")
+
+            # 🔁 Load preprocessing config
+            vec_path = f"{filepath}.bundle.pkl"
+            if os.path.exists(vec_path):
+                bundle = joblib.load(vec_path)
+                self.__transformers = bundle.get("transformers", {})
+                self.__input_feature_names = bundle.get("input_feature_names", None)
+                print(f"✅ Loaded preprocessing bundle from: {vec_path}")

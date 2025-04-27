@@ -134,6 +134,10 @@ class SecureDatasetClient:
             task_type=task_type,
             framework=framework
         )
+        self.__trained_model = self.model_manager.get_modal()
+        self.__X_val = self.model_manager.get_x_val()
+        self.__y_val = self.model_manager.get_y_val()
+        
 
             
     def evaluate(self):
@@ -144,8 +148,8 @@ class SecureDatasetClient:
 
 
     def save_model(self, filepath: str):
-        self.model_manager.save(path)
+        self.model_manager.save(filepath)
         
 
     def load_model(self, filepath: str, training_framework: str) -> None:
-        self.model_manager.load(path, framework)
+        self.model_manager.load(filepath, training_framework)

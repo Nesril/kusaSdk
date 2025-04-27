@@ -25,7 +25,6 @@ class ModelManager:
             if not target_column or target_column not in processed_df.columns:
                 raise DatasetSDKException(f"Invalid or missing target_column: '{target_column}'.")
 
-            print("processed_df ",processed_df)
             # Separate features and labels
             X =  processed_df.drop(columns=[target_column])
             y =  processed_df[target_column]
@@ -87,8 +86,7 @@ class ModelManager:
             # Save model and validation set
             self.model = model
             self.X_val = X_val
-            self.y_val = y_val
-            
+            self.y_val = y_val            
 
             print("✅ Training complete.")
             return model
@@ -96,7 +94,7 @@ class ModelManager:
 
     def predict(self, input_df,transformers):
         self.__transformers = transformers
-        print("--->> input_df ",input_df)
+
         if self.model is None:
             raise DatasetSDKException("Model not trained or loaded.")
 
@@ -129,7 +127,7 @@ class ModelManager:
             if self.training_framework == "sklearn":
                 trained_cols = self.model.feature_names_in_  # sklearn sets this after .fit()
             else:
-                trained_cols = self.__input_feature_names
+                trained_cols = self.input_feature_names
 
 
             input_df = input_df.reindex(columns=trained_cols, fill_value=0)
@@ -268,7 +266,7 @@ class ModelManager:
         vec_path = f"{filepath}.bundle.pkl"
         bundle = {
             "transformers": self.__transformers,
-            "input_feature_names": self.__input_feature_names
+            "input_feature_names": self.input_feature_names
         }
         joblib.dump(bundle, vec_path)
         print(f"🧠 Saved preprocessing bundle to: {vec_path}")
@@ -312,3 +310,12 @@ class ModelManager:
             self.input_feature_names = bundle.get("input_feature_names", None)
             print(f"✅ Loaded preprocessing bundle from: {vec_path}")
     
+    
+    def get_x_val(self):
+        return self.X_val
+
+    def get_y_val(self):
+        return self.y_val
+    
+    def get_modal(self):
+        return self.model

@@ -35,13 +35,14 @@ class PreprocessingManager:
             if key not in default_config:
                 print(f"⚠️ Unknown config key: '{key}' – ignoring.")
         # Merge with defaults
-        self.__preprocessing_config = {**default_config, **config}
+        self.config = {**default_config, **config}
 
     def run(self, raw_df):
         if raw_df is None:
             raise DatasetSDKException("Raw dataset not loaded. Fetch a batch first.")
 
         df = raw_df.copy()
+        
         config = self.config
         target_column = config.get("target_column")
 
@@ -101,8 +102,8 @@ class PreprocessingManager:
         # "reduction": "tfidf" → it applies only to text columns.
         # "reduction": "tfidf_pca" → they need to handle both separately (TF-IDF for text, then PCA for numeric).
         
-        reduction = config.get("reduction", "none")
-
+        reduction = config["reduction"]
+        
         if reduction == "tfidf":
             self.transformers["tfidf_vectorizers"] = {}
 

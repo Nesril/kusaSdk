@@ -15,6 +15,7 @@ class ModelManager:
         self.input_feature_names = None
         self.X_val = None
         self.y_val = None
+        self.__transformers= None
 
     def train(self, processed_df, user_train_func, hyperparams, target_column, task_type, framework):
        
@@ -93,7 +94,9 @@ class ModelManager:
             return model
 
 
-    def predict(self, input_df):
+    def predict(self, input_df,transformers):
+        self.__transformers = transformers
+        print("--->> input_df ",input_df)
         if self.model is None:
             raise DatasetSDKException("Model not trained or loaded.")
 

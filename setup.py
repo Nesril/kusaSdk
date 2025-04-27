@@ -15,7 +15,9 @@ setup(
         'numpy',
         "nltk",
         "joblib",
-        "scikit-learn"
+        "scikit-learn",
+        "torch",
+        "tensorflow"
     ],
     python_requires='>=3.6',
 )

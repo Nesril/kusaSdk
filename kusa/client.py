@@ -502,7 +502,6 @@ class SecureDatasetClient:
         if self.__trained_model is None:
             raise DatasetSDKException("Model not trained or loaded.")
 
-        print("self.__input_feature_names ",self.__input_feature_names)
         # ✅ Ensure input is always a DataFrame (even if it's a Tensor)
         if not isinstance(input_df, pd.DataFrame):
             if isinstance(input_df, tf.Tensor):

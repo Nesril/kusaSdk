@@ -5,3 +5,5 @@ numpy
 nltk
 joblib
 scikit-learn
+torch
+tensorflow

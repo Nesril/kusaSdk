@@ -12,3 +12,5 @@ Requires-Dist: numpy
 Requires-Dist: nltk
 Requires-Dist: joblib
 Requires-Dist: scikit-learn
+Requires-Dist: torch
+Requires-Dist: tensorflow

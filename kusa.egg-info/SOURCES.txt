@@ -2,8 +2,11 @@ setup.py
 kusa/__init__.py
 kusa/client.py
 kusa/config.py
+kusa/encryption_manager.py
 kusa/exceptions.py
 kusa/kusaSdk.py
+kusa/model_manager.py
+kusa/preprocessing_manager.py
 kusa/utils.py
 kusa.egg-info/PKG-INFO
 kusa.egg-info/SOURCES.txt

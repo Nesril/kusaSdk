@@ -1,32 +1,15 @@
 import os
-import json
 import base64
 import pandas as pd
-import numpy as np
-
 from io import StringIO
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import padding
-from cryptography.hazmat.backends import default_backend
 
 from kusa.config import Config
 from kusa.utils import make_request
 from kusa.exceptions import DatasetSDKException
 
-from sklearn.decomposition import PCA
-from sklearn.feature_extraction.text import TfidfVectorizer
-import nltk
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, classification_report
-import joblib
-import re
-import spacy
-import tensorflow as tf
-import torch
-
+from kusa.preprocessing_manager import PreprocessingManager
+from kusa.model_manager import ModelManager
+from kusa.encryption_manager import EncryptionManager
 
 
 class SecureDatasetClient:
@@ -48,6 +31,10 @@ class SecureDatasetClient:
         self.__X_val = None
         self.__y_val = None
         self.__input_feature_names = None
+        
+        self.preprocessing_manager = PreprocessingManager()
+        self.model_manager = ModelManager()
+        self.encryption_manager = EncryptionManager()
         
 
     def _validate_keys(self):
@@ -79,13 +66,12 @@ class SecureDatasetClient:
             "metadata": self.__metadata
         }
 
-    def fetch_and_decrypt_batch(self, batch_size=500, batch_number=0):
-        """Fetches and securely decrypts data internally only."""
 
+    def fetch_and_decrypt_batch(self, batch_size=500, batch_number=0):
+        """Fetches encrypted batch from API, decrypts, and loads into internal memory."""
         if not self.__metadata:
-          raise DatasetSDKException("Initialization is required")
-          return
-      
+            raise DatasetSDKException("Initialization is required.")
+
         url = f"{self.base_url}/get/{self.public_id}/encryptbatch"
         params = {
             "batchSize": batch_size,
@@ -94,579 +80,72 @@ class SecureDatasetClient:
 
         data = make_request(url, headers=self.headers, params=params)
 
+        # Decode base64 payloads
         encrypted_data = base64.b64decode(data["batchData"])
         encrypted_key = base64.b64decode(data["encryptedKey"])
 
-        symmetric_key = self._decrypt_data(encrypted_key, self.encryption_key.encode()).decode()
-        raw_csv = self._decrypt_data(encrypted_data, symmetric_key.encode()).decode()
+        # Decrypt symmetric key
+        decryptor =  self.encryption_manager
+        symmetric_key = decryptor.decrypt(encrypted_key, self.encryption_key.encode()).decode()
 
+        # Decrypt CSV data
+        raw_csv = decryptor.decrypt(encrypted_data, symmetric_key.encode()).decode()
+
+        # Parse decrypted CSV into DataFrame
         df = pd.read_csv(StringIO(raw_csv))
-        self.__raw_df = df.copy()  # Raw data never exposed
-        return True  # Indicate internal load complete
+        self.__raw_df = df.copy()
 
-    def _decrypt_data(self, encrypted_bytes: bytes, key: bytes) -> bytes:
-        iv = encrypted_bytes[:16]
-        ciphertext = encrypted_bytes[16:]
+        print("✅ Batch fetched and decrypted successfully.")
+        return True
 
-        cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-        decryptor = cipher.decryptor()
-        padded = decryptor.update(ciphertext) + decryptor.finalize()
-
-        unpadder = padding.PKCS7(128).unpadder()
-        return unpadder.update(padded) + unpadder.finalize()
     
-    # run preprocessing ( phase 2)
-    # sdk.configure_preprocessing({
-    #     "reduction": "pca",
-    #     "n_components": 3,
-    #     "tokenizer": "nltk",
-    #     "stopwords": True,
-    # })
-    # sdk.run_preprocessing()
-    
-    # ✅ This Now Supports:
-    # Custom text preprocessing (tokenizer, stopwords, lemmatization, etc.)
-
-    # TF-IDF and PCA feature reduction
-
-    # Clean future support for numpy/tensors
-
-    # Compatible with scikit-learn, TF, PyTorch, etc.
-
-
-
     def configure_preprocessing(self, config: dict):
         """
             Accepts user-defined preprocessing config.
             Validates and stores it internally.
         """
-        default_config = {
-            "tokenizer": "nltk",             # or 'spacy', 'split', 'none'
-            "stopwords": True,
-            "lowercase": True,
-            "remove_punctuation": True,
-            "lemmatize": False,
-            "reduction": "none",             # 'tfidf', 'pca', or 'none'
-            "n_components": 2,               # For PCA
-            "tfidf_max_features": 500,       # For TF-IDF
-            "target_column": None,
-            "output_format": "pandas"        # Can support tensor/numpy later
-        }
-        config = config or {}
-        for key in config:
-            if key not in default_config:
-                print(f"⚠️ Unknown config key: '{key}' – ignoring.")
-        # Merge with defaults
-        self.__preprocessing_config = {**default_config, **config}
-
-
-    def ensure_nltk_tokenizer_resources(self):
-        """Securely verify and download required NLTK resources"""
-        try:
-            # List of required NLTK resources
-            resources = ['punkt', 'punkt_tab', 'stopwords']
-            for res in resources:
-                try:
-                    # Check if the resource is already available
-                    nltk.data.find(f'tokenizers/{res}' if res.startswith('punkt') else f'corpora/{res}')
-                except LookupError:
-                    # Download the resource if not found
-                    nltk.download(res, quiet=True)
-        except Exception as e:
-            self._emergency_cleanup()
-            raise DatasetSDKException(f"Resource verification failed: {str(e)}")
+        self.preprocessing_manager.configure(config)
 
     def run_preprocessing(self):
         """
         Full secure preprocessing pipeline for tabular/text data.
         Steps: Clean → Tokenize → Reduce → Target Encode → Store.
         """
-
-        if self.__raw_df is None:
-            raise DatasetSDKException("Raw dataset not loaded. Fetch a batch first.")
-
-        df = self.__raw_df.copy()
-        config = self.__preprocessing_config
-        target_column = config.get("target_column")
-
-        # Check if target column exists
-        if target_column and target_column not in df.columns:
-            raise DatasetSDKException(f"Target column '{target_column}' not found in dataset.")
-
-        # Extract target column if exists
-        y = None
-        if target_column:
-            y = df[target_column]
-            df = df.drop(columns=[target_column])
-
-        # Preprocessing on text columns
-        text_cols = df.select_dtypes(include=["object"]).columns
-        for col in text_cols:
-            df[col] = df[col].astype(str)
-
-            # Lowercase
-            if config.get("lowercase", True):
-                df[col] = df[col].str.lower()
-
-            # Remove punctuation
-            if config.get("remove_punctuation", True):
-                df[col] = df[col].str.replace(r"[^\w\s]", "", regex=True)
-
-            # Tokenization
-            tokenizer_type = config.get("tokenizer", "nltk")
-            if tokenizer_type == "nltk":
-                self.ensure_nltk_tokenizer_resources()
-                df[col] = df[col].apply(word_tokenize)
-            elif tokenizer_type == "spacy":
-                nlp = spacy.load("en_core_web_sm")
-                df[col] = df[col].apply(lambda x: [token.text for token in nlp(x)])
-            elif tokenizer_type == "split":
-                df[col] = df[col].apply(lambda x: x.split())
-            elif tokenizer_type == "none":
-                df[col] = df[col].apply(lambda x: [x])  # wrap as list
-
-            # Stopword removal
-            if config.get("stopwords", True):
-                stop_words = set(stopwords.words("english"))
-                df[col] = df[col].apply(lambda tokens: [w for w in tokens if w.lower() not in stop_words])
-
-            # Lemmatization (optional, spaCy only)
-            if config.get("lemmatize", False) and tokenizer_type == "spacy":
-                df[col] = df[col].apply(lambda tokens: [token.lemma_ for token in nlp(" ".join(tokens))])
-
-            # Rejoin tokens to string for vectorizers
-            df[col] = df[col].apply(lambda tokens: " ".join(tokens))
-
-        # ===============================
-        # Feature Reduction (TF-IDF / PCA)
-        # ===============================
+        self.preprocessing_manager.run(self.__raw_df)
         
-        # "reduction": "pca" → it applies only to numeric columns.
-        # "reduction": "tfidf" → it applies only to text columns.
-        # "reduction": "tfidf_pca" → they need to handle both separately (TF-IDF for text, then PCA for numeric).
+    def train(self, user_train_func, hyperparams: dict = None, target_column: str = None, 
+            task_type: str = "classification", framework: str = "sklearn"):
+        """
+        Train a model using the user's function, securely inside the SDK.
+        Supports sklearn, tensorflow, and pytorch frameworks.
         
-        reduction = config.get("reduction", "none")
-
-        if reduction == "tfidf":
-            self.__transformers["tfidf_vectorizers"] = {}
-
-            max_feats = config.get("tfidf_max_features", 500)
-            vectorizer = TfidfVectorizer(max_features=max_feats)
-
-            for col in text_cols:
-                tfidf_matrix = vectorizer.fit_transform(df[col])
-                tfidf_df = pd.DataFrame(
-                    tfidf_matrix.toarray(),
-                    columns=[f"{col}_tfidf_{w}" for w in vectorizer.get_feature_names_out()]
-                )
-                df = df.drop(columns=[col]).join(tfidf_df)
-                self.__transformers["tfidf_vectorizers"][col] = vectorizer # ✅ Save vectorizer
-            
-
-        elif reduction == "tfidf_pca":
-            self.__transformers["tfidf_vectorizers"] = {}
-            tfidf_outputs = []
-            tfidf_feature_names = []
-
-            for col in text_cols:
-                vectorizer = TfidfVectorizer(max_features=config.get("tfidf_max_features", 500))
-                tfidf_matrix = vectorizer.fit_transform(df[col])
-                
-                self.__transformers["tfidf_vectorizers"][col] = vectorizer
-                tfidf_outputs.append(tfidf_matrix)
-                tfidf_feature_names += [f"{col}_tfidf_{feat}" for feat in vectorizer.get_feature_names_out()]
-
-            from scipy.sparse import hstack
-            combined_tfidf = hstack(tfidf_outputs).toarray()
-
-            # Apply PCA to combined TF-IDF
-            n_components = config.get("n_components", 2)
-            pca = PCA(n_components=n_components)
-            reduced_tfidf = pca.fit_transform(combined_tfidf)
-
-            self.__transformers["pca_tfidf"] = {
-                "pca": pca,
-                "tfidf_feature_names": tfidf_feature_names,
-                "pca_feature_names": [f"pca_tfidf_{i+1}" for i in range(n_components)]
-            }
-
-            # Numeric features (keep them)
-            df_numeric = df.select_dtypes(include=[np.number]).reset_index(drop=True)
-            df_reduced = pd.DataFrame(reduced_tfidf, columns=self.__transformers["pca_tfidf"]["pca_feature_names"])
-            df = pd.concat([df_numeric.reset_index(drop=True), df_reduced], axis=1)
-
-
-        elif reduction == "pca":
-            n_components = config.get("n_components", 2)
-
-            # Keep only numeric columns for PCA
-            numeric_df = df.select_dtypes(include=[np.number]).dropna(axis=1)
-
-            scaler = StandardScaler()
-            scaled = scaler.fit_transform(numeric_df)
-
-            pca = PCA(n_components=n_components)
-            reduced = pca.fit_transform(scaled)
-
-            # ✅ Drop ALL non-numeric columns (object, datetime, etc.)
-            df = df.select_dtypes(include=[np.number])
-            df = df.drop(columns=numeric_df.columns)  # Drop numeric columns used in PCA
-
-            # ✅ Add PCA components
-            pca_feature_names = [f"pca_{i+1}" for i in range(n_components)]
-            print("pca_feature_names ",pca_feature_names)
-            for i, name in enumerate(pca_feature_names):
-                df[name] = reduced[:, i]
-
-            # ✅ Save transformer info
-            self.__transformers["pca"] = {
-                "scaler": scaler,
-                "pca": pca,
-                "trained_numeric_columns": numeric_df.columns.tolist(),
-                "trained_pca_feature_names": pca_feature_names
-            }
-         
-        # ===============================
-        # Target Encoding (Auto / Custom)
-        # ===============================
-        if y is not None:
-            encoding_mode = config.get("target_encoding", "auto")
-
-            if encoding_mode == "auto":
-                if y.dtype == object or y.dtype == "O":
-                    unique_values = y.unique()
-                    if len(unique_values) == 2:
-                        mapping = {unique_values[0]: 0, unique_values[1]: 1}
-                        y = y.map(mapping)
-                        print(f"🔢 Auto target encoding applied: {mapping}")
-                    else:
-                        raise DatasetSDKException(f"Cannot auto-encode target with >2 classes: {unique_values}")
-            elif isinstance(encoding_mode, dict):
-                y = y.map(encoding_mode)
-                print(f"🔢 Custom target encoding applied: {encoding_mode}")
-            elif encoding_mode == "none":
-                pass  # leave y unchanged
-            else:
-                raise DatasetSDKException(f"Invalid target_encoding value: {encoding_mode}")
-
-            df[target_column] = y.reset_index(drop=True)
-
-        # Final output format
-        output_format = config.get("output_format", "pandas")
-        if output_format != "pandas":
-            raise DatasetSDKException(f"Output format '{output_format}' is not supported yet.")
-
-        self.__processed = df
-        print("✅ Preprocessing completed successfully.")
-
-    # 🧠 Phase 3: Model Training Framework
-    # def my_model(X, y, **params):
-    #     # Train a model here
-    #     model = SomeModel(**params)
-    #     model.fit(X, y)
-    #     return model
-
-    # sdk.train(my_model, {
-    #     "learning_rate": 0.01,
-    #     "epochs": 10
-    # })
-
-    # Think of your SDK like a gym.
-    # You bring your own coach (train_model), and the gym just gives them the tools, machines, and environment.
-
-    def train(self,user_train_func,hyperparams: dict = None,target_column: str = None,task_type: str = "classification",framework: str = "sklearn"):
-            """
-            Train a model using the user's function, securely inside the SDK.
-            Supports sklearn, tensorflow, and pytorch frameworks.
-            """
-            if self.__processed is None:
-                raise DatasetSDKException("No processed data available. Run preprocessing first.")
-
-            if not target_column or target_column not in self.__processed.columns:
-                raise DatasetSDKException(f"Invalid or missing target_column: '{target_column}'.")
-
-            # Separate features and labels
-            X = self.__processed.drop(columns=[target_column])
-            y = self.__processed[target_column]
-
-            print("📊 Class counts:\n", y.value_counts())
-
-            # Prepare train/val split
-            stratify_y = y if task_type == "classification" else None
-            X_train, X_val, y_train, y_val = train_test_split(
-                X, y, test_size=0.2, random_state=42, stratify=stratify_y
-            )
-
-            self.__training_framework = framework
-            self.__task_type = task_type
-            self.__input_feature_names = X_train.columns.tolist()
-            
-            model = None
-
-            try:
-                # Framework-aware logic
-                if framework == "sklearn":
-                      model = user_train_func(X_train, y_train, **(hyperparams or {}))
-
-                elif framework == "tensorflow":
-                    if not isinstance(X_train, tf.Tensor):
-                        X_train = tf.convert_to_tensor(X_train, dtype=tf.float32)
-                        X_val = tf.convert_to_tensor(X_val, dtype=tf.float32)
-                        y_train = tf.convert_to_tensor(y_train, dtype=tf.float32)
-                        y_val = tf.convert_to_tensor(y_val, dtype=tf.float32)
-
-                    model = user_train_func(X_train, y_train, X_val, y_val, **(hyperparams or {}))
-
-                elif framework == "pytorch":
-                    def to_tensor(df):
-                        if isinstance(df, pd.Series):
-                            if df.dtype == "O":
-                                df = df.astype("float32")
-                            return torch.tensor(df.values.reshape(-1, 1), dtype=torch.float32)
-
-                        # If it's a DataFrame
-                        if df.dtypes.eq("O").any():
-                            df = df.astype("float32")
-                        return torch.tensor(df.values, dtype=torch.float32)
-
-
-                    X_train_tensor = to_tensor(X_train)
-                    y_train_tensor = to_tensor(y_train)
-                    X_val_tensor = to_tensor(X_val)
-                    y_val_tensor = to_tensor(y_val)
-
-                    model = user_train_func(X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, **(hyperparams or {}))
-
-                else:
-                    raise DatasetSDKException(f"Unsupported framework: '{framework}'")
-
-            except Exception as e:
-                raise DatasetSDKException(f"Model training failed: {str(e)}")
-
-            # Save model and validation set
-            self.__trained_model = model
-            self.__X_val = X_val
-            self.__y_val = y_val
-            
-
-            print("✅ Training complete.")
-            return model
+        Args:
+            user_train_func: User-defined training function
+            hyperparams: Dictionary of hyperparameters
+            target_column: Name of the target column
+            task_type: Type of ML task ('classification' or 'regression')
+            framework: ML framework to use ('sklearn', 'tensorflow', or 'pytorch')
+        """
+        self.model_manager.train(
+            processed_df=self.preprocessing_manager.get_processed_data(),
+            user_train_func=user_train_func,
+            hyperparams=hyperparams,
+            target_column=target_column,
+            task_type=task_type,
+            framework=framework
+        )
 
             
     def evaluate(self):
-        if self.__trained_model is None or self.__X_val is None:
-            raise DatasetSDKException("No trained model or validation data available.")
-
-        try:
-            if self.__training_framework == "sklearn":
-                preds = self.__trained_model.predict(self.__X_val)
-
-            elif self.__training_framework == "tensorflow":
-                preds = (self.__trained_model.predict(self.__X_val) > 0.5).astype("int32").flatten()
-
-            elif self.__training_framework == "pytorch":
-                self.__trained_model.eval()
-                with torch.no_grad():
-                    inputs = torch.tensor(self.__X_val.values, dtype=torch.float32)
-                    outputs = self.__trained_model(inputs)
-                    preds = torch.argmax(outputs, dim=1).numpy()
-            else:
-                raise DatasetSDKException(f"Unsupported framework: {self.__training_framework}")
-
-        except Exception as e:
-            raise DatasetSDKException(f"Evaluation failed: {str(e)}")
-
-        if self.__task_type == "classification":
-            accuracy = accuracy_score(self.__y_val, preds)
-            report = classification_report(self.__y_val, preds)
-            return {
-                "accuracy": accuracy,
-                "report": report
-            }
-
-        elif self.__task_type == "regression":
-            from sklearn.metrics import mean_squared_error, r2_score
-            mse = mean_squared_error(self.__y_val, preds)
-            r2 = r2_score(self.__y_val, preds)
-            return {
-                "mse": mse,
-                "r2_score": r2
-            }
-
-        else:
-            raise DatasetSDKException(f"Unsupported task_type: '{self.__task_type}'")
-
+        return self.model_manager.evaluate()
        
-
     def predict(self, input_df):
-        if self.__trained_model is None:
-            raise DatasetSDKException("Model not trained or loaded.")
-
-        # ✅ Ensure input is always a DataFrame (even if it's a Tensor)
-        if not isinstance(input_df, pd.DataFrame):
-            if isinstance(input_df, tf.Tensor):
-                input_df = pd.DataFrame(input_df.numpy(), columns=self.__input_feature_names)
-            elif isinstance(input_df, torch.Tensor):
-                input_df = pd.DataFrame(input_df.numpy(), columns=self.__input_feature_names)
-            else:
-                raise DatasetSDKException("Unsupported input type for prediction.")
-
-        # ✅ Apply saved vectorizers
-        if "tfidf_vectorizers" in self.__transformers:
-           # Prepare input_df to match trained TF-IDF structure
-            all_cols = []
-
-            for col, vec in self.__transformers["tfidf_vectorizers"].items():
-                if col in input_df.columns:
-                    tfidf = vec.transform(input_df[col].astype(str))
-                    feature_names = [f"{col}_tfidf_{w}" for w in vec.get_feature_names_out()]
-                    tfidf_df = pd.DataFrame(tfidf.toarray(), columns=feature_names)
-
-                    # Save the column names for padding later
-                    all_cols.extend(feature_names)
-
-                    input_df = input_df.drop(columns=[col]).join(tfidf_df)
-
-            # Ensure consistent column order and fill missing ones
-            if self.__training_framework == "sklearn":
-                trained_cols = self.__trained_model.feature_names_in_  # sklearn sets this after .fit()
-            else:
-                trained_cols = self.__input_feature_names
-
-
-            input_df = input_df.reindex(columns=trained_cols, fill_value=0)
-
-                    
-        elif "pca_tfidf" in self.__transformers:
-            tfidf_vecs = self.__transformers["tfidf_vectorizers"]
-            tfidf_outputs = []
-
-            for col, vec in tfidf_vecs.items():
-                if col in input_df.columns:
-                    tfidf_matrix = vec.transform(input_df[col].astype(str))
-                    tfidf_outputs.append(tfidf_matrix)
-                else:
-                    # If missing column, fill with zeros
-                    tfidf_outputs.append(np.zeros((1, vec.max_features)))
-
-            from scipy.sparse import hstack
-            combined_tfidf = hstack(tfidf_outputs).toarray()
-
-            # Apply PCA
-            pca = self.__transformers["pca_tfidf"]["pca"]
-            reduced = pca.transform(combined_tfidf)
-            reduced_df = pd.DataFrame(reduced, columns=self.__transformers["pca_tfidf"]["pca_feature_names"])
-
-            # Include numeric columns if any
-            numeric_input = input_df.select_dtypes(include=[np.number])
-            input_df = pd.concat([numeric_input.reset_index(drop=True), reduced_df], axis=1)
-
-        elif "pca" in self.__transformers:
-            scaler = self.__transformers["pca"]["scaler"]
-            pca = self.__transformers["pca"]["pca"]
-
-            # Only scale numeric columns (just like training)
-            numeric_input = input_df.select_dtypes(include=[np.number]).dropna(axis=1)
-
-            # ⚠️ Handle missing columns if user omits any
-            trained_cols = self.__transformers["pca"].get("trained_numeric_columns", [])
-            numeric_input = numeric_input.reindex(columns=trained_cols, fill_value=0)
-
-            # Scale → Apply PCA
-            scaled = scaler.transform(numeric_input)
-            reduced = pca.transform(scaled)
-
-            # input_df = pd.DataFrame(reduced, columns=[f"pca_{i+1}" for i in range(reduced.shape[1])])
-            input_df = pd.DataFrame(reduced, columns=self.__transformers["pca"]["trained_pca_feature_names"])
-
-
-        try:
-            if self.__training_framework == "sklearn":
-                return self.__trained_model.predict(input_df)
-
-            elif self.__training_framework == "tensorflow":
-                return (self.__trained_model.predict(input_df) > 0.5).astype("int32").flatten()
-
-            elif self.__training_framework == "pytorch":
-                self.__trained_model.eval()
-                with torch.no_grad():
-                    inputs = torch.tensor(input_df.values, dtype=torch.float32)
-                    outputs = self.__trained_model(inputs)
-                    return torch.argmax(outputs, dim=1).numpy()
-
-            else:
-                raise DatasetSDKException(f"Unsupported framework: {self.__training_framework}")
-
-        except Exception as e:
-            raise DatasetSDKException(f"Prediction failed: {str(e)}")
+        return self.model_manager.predict(input_df, self.preprocessing_manager.get_transformers())
 
 
     def save_model(self, filepath: str):
-        if self.__trained_model is None:
-            raise DatasetSDKException("No trained model to save.")
-
-        # Ensure extension for TensorFlow
-        if self.__training_framework == "tensorflow":
-            if not filepath.endswith(".keras") and not filepath.endswith(".h5"):
-                filepath += ".keras"
-
-        # Save model
-        if self.__training_framework == "sklearn":
-            joblib.dump(self.__trained_model, filepath)
-
-        elif self.__training_framework == "tensorflow":
-            self.__trained_model.save(filepath)
-
-        elif self.__training_framework == "pytorch":
-            torch.save(self.__trained_model.state_dict(), filepath)
-
-        else:
-            raise DatasetSDKException(f"Unsupported framework for saving: {self.__training_framework}")
-
-        # 🔐 Bundle and save transformers + input feature names
-        vec_path = f"{filepath}.bundle.pkl"
-        bundle = {
-            "transformers": self.__transformers,
-            "input_feature_names": self.__input_feature_names
-        }
-        joblib.dump(bundle, vec_path)
-        print(f"🧠 Saved preprocessing bundle to: {vec_path}")
-        print(f"✅ Model saved to: {filepath}")
-
+        self.model_manager.save(path)
+        
 
     def load_model(self, filepath: str, training_framework: str) -> None:
-            if not training_framework:
-                raise DatasetSDKException("Training framework is required to load model.")
-            if not os.path.exists(filepath):
-                raise DatasetSDKException(f"No model found at: {filepath}")
-            if training_framework not in ["pytorch", "tensorflow", "sklearn"]:
-                raise DatasetSDKException(f"Unsupported framework: {training_framework}")
-
-            self.__training_framework = training_framework
-
-            try:
-                if training_framework == "sklearn":
-                    self.__trained_model = joblib.load(filepath)
-
-                elif training_framework == "tensorflow":
-                    self.__trained_model = tf.keras.models.load_model(filepath)
-
-                elif training_framework == "pytorch":
-                    if self.__trained_model is None:
-                        raise DatasetSDKException(
-                            "For PyTorch, model architecture must be initialized before loading weights. "
-                            "Call initialize_pytorch_model() first or provide model architecture."
-                        )
-                    self.__trained_model.load_state_dict(torch.load(filepath))
-                    self.__trained_model.eval()
-
-            except Exception as e:
-                raise DatasetSDKException(f"Failed to load {training_framework} model: {str(e)}")
-
-            # 🔁 Load preprocessing config
-            vec_path = f"{filepath}.bundle.pkl"
-            if os.path.exists(vec_path):
-                bundle = joblib.load(vec_path)
-                self.__transformers = bundle.get("transformers", {})
-                self.__input_feature_names = bundle.get("input_feature_names", None)
-                print(f"✅ Loaded preprocessing bundle from: {vec_path}")
+        self.model_manager.load(path, framework)

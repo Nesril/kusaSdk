@@ -93,7 +93,8 @@ class ModelManager:
 
 
     def predict(self, input_df,transformers):
-        self.__transformers = transformers
+        if not self.__transformers:
+          self.__transformers = transformers
 
         if self.model is None:
             raise DatasetSDKException("Model not trained or loaded.")
@@ -274,7 +275,7 @@ class ModelManager:
 
 
     def load(self, filepath, training_framework):
-        print(filepath,training_framework)
+
         if not training_framework:
             raise DatasetSDKException("Training framework is required to load model.")
         if not os.path.exists(filepath):
@@ -283,7 +284,6 @@ class ModelManager:
             raise DatasetSDKException(f"Unsupported framework: {training_framework}")
 
         self.training_framework = training_framework
-        print("training_framework ",training_framework)
 
         try:
             if training_framework == "sklearn":
@@ -310,6 +310,7 @@ class ModelManager:
             bundle = joblib.load(vec_path)
             self.__transformers = bundle.get("transformers", {})
             self.input_feature_names = bundle.get("input_feature_names", None)
+            print("self.__transformers ",self.__transformers)
             print(f"✅ Loaded preprocessing bundle from: {vec_path}")
     
     

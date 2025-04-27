@@ -152,7 +152,7 @@ class SecureDatasetClient:
         return self.model_manager.evaluate()
        
     def predict(self, input_df):
-        print("get_transformers ",self.preprocessing_manager.get_transformers())
+
         return self.model_manager.predict(input_df, self.preprocessing_manager.get_transformers())
 
 

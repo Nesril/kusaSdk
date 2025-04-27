@@ -36,6 +36,14 @@ class SecureDatasetClient:
         self.model_manager = ModelManager()
         self.encryption_manager = EncryptionManager()
         
+        def __getattribute__(self, name):
+            if name in ['_SecureDatasetClient__encryption_key', 
+                       '_SecureDatasetClient__secret_key',
+                       'encryption_key', 'secret_key']:
+                raise AttributeError("Access to sensitive attribute denied")
+            return object.__getattribute__(self, name)
+
+        
 
     def _validate_keys(self):
         if not self.public_id or not self.secret_key:
@@ -144,6 +152,7 @@ class SecureDatasetClient:
         return self.model_manager.evaluate()
        
     def predict(self, input_df):
+        print("get_transformers ",self.preprocessing_manager.get_transformers())
         return self.model_manager.predict(input_df, self.preprocessing_manager.get_transformers())
 
 

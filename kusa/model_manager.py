@@ -5,7 +5,7 @@ import joblib
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import train_test_split
 from kusa.exceptions import DatasetSDKException
-
+import os
 from sklearn.decomposition import PCA
 class ModelManager:
     def __init__(self):
@@ -273,7 +273,8 @@ class ModelManager:
         print(f"✅ Model saved to: {filepath}")
 
 
-    def load(self, filepath, framework):
+    def load(self, filepath, training_framework):
+        print(filepath,training_framework)
         if not training_framework:
             raise DatasetSDKException("Training framework is required to load model.")
         if not os.path.exists(filepath):
@@ -282,6 +283,7 @@ class ModelManager:
             raise DatasetSDKException(f"Unsupported framework: {training_framework}")
 
         self.training_framework = training_framework
+        print("training_framework ",training_framework)
 
         try:
             if training_framework == "sklearn":

@@ -45,8 +45,7 @@ class Config:
         """Get BASE_URL with automatic change detection"""
         Config.reload_env()
         base_url = os.getenv("BASE_URL")
-        base_url = "http://localhost:5000/dataset" 
-        
+                
         if not base_url:
             raise ValueError("BASE_URL must be set in .env file or environment")
         return base_url.rstrip('/')
@@ -55,8 +54,9 @@ class Config:
     def get_encryption_key() -> str:
         """Get ENCRYPTION_KEY with automatic change detection"""
         Config.reload_env()
-        key = os.getenv("ENCRYPTION_KEY")
-        key= "R@BrG8XQh1A6d%%PZz5Uh0P$YeouD4Z*"
+        key = os.getenv("SECRET_KEY")
+        key = key[:32] if key else None
+
         if not key:
             raise ValueError("ENCRYPTION_KEY must be set in .env file or environment")
         return key

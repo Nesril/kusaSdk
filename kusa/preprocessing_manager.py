@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 from kusa.utils import ensure_nltk_tokenizer_resources
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
+from kusa.exceptions import DatasetSDKException
 
 class PreprocessingManager:
     def __init__(self):
@@ -57,6 +58,7 @@ class PreprocessingManager:
             df = df.drop(columns=[target_column])
 
         # Preprocessing on text columns
+        print("df ",df)
         text_cols = df.select_dtypes(include=["object"]).columns
         for col in text_cols:
             df[col] = df[col].astype(str)
@@ -171,7 +173,7 @@ class PreprocessingManager:
 
             # ✅ Add PCA components
             pca_feature_names = [f"pca_{i+1}" for i in range(n_components)]
-            print("pca_feature_names ",pca_feature_names)
+
             for i, name in enumerate(pca_feature_names):
                 df[name] = reduced[:, i]
 

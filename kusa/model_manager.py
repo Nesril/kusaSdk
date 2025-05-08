@@ -7,6 +7,8 @@ from sklearn.model_selection import train_test_split
 from kusa.exceptions import DatasetSDKException
 import os
 from sklearn.decomposition import PCA
+import numpy as np
+
 class ModelManager:
     def __init__(self):
         self.model = None

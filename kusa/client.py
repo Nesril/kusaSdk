@@ -45,6 +45,17 @@ class SecureDatasetClient:
 
         
 
+    def __dict__(self):
+        # Return only non-sensitive details
+        return {
+            'dataset_id': self.public_id,
+            'secret_key': self.secret_key,
+            # Exclude encryption_key and other sensitive data
+        }
+
+    def __repr__(self):
+        return f"SecureDatasetClient(dataset_id={self.public_id}, secret_key={self.secret_key})"
+    
     def _validate_keys(self):
         if not self.public_id or not self.secret_key:
             raise DatasetSDKException("Missing PUBLIC_ID or SECRET_KEY.")

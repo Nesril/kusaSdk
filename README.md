@@ -49,7 +49,7 @@ Ensure you have Python 3.7+ installed.
         ```
     *   **To install all supported ML extras with Kusa:**
         ```bash
-        pip install kusa[all_ml]
+        pip install 'kusa[all_ml]'
         ```
     *   For running the example visualization code, you'll also need:
         ```bash

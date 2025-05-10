@@ -39,12 +39,12 @@ Ensure you have Python 3.7+ installed.
         `requests`, `pandas`, `cryptography`, `numpy`, `nltk`, `joblib`, `scikit-learn`, `python-dotenv`
     *   **For TensorFlow support (Optional):**
         ```bash
-        pip install kusa[tensorflow]
+        pip install 'kusa[tensorflow]'
         # or simply: pip install tensorflow
         ```
     *   **For PyTorch support (Optional):**
         ```bash
-        pip install kusa[pytorch]
+        pip install 'kusa[pytorch]'
         # or simply: pip install torch torchvision
         ```
     *   **To install all supported ML extras with Kusa:**

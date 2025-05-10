@@ -1,6 +1,4 @@
 import pandas as pd
-import torch
-import tensorflow as tf
 import joblib
 from sklearn.metrics import accuracy_score, classification_report
 from sklearn.model_selection import train_test_split
@@ -8,6 +6,20 @@ from kusa.exceptions import DatasetSDKException
 import os
 from sklearn.decomposition import PCA
 import numpy as np
+
+try:
+    import tensorflow as tf
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    TENSORFLOW_AVAILABLE = False
+
+try:
+    import torch
+    PYTORCH_AVAILABLE = True
+except ImportError:
+    PYTORCH_AVAILABLE = False
+
+
 
 class ModelManager:
     def __init__(self):
@@ -51,6 +63,11 @@ class ModelManager:
                         model = user_train_func(X_train, y_train, **(hyperparams or {}))
 
                 elif framework == "tensorflow":
+                    if not TENSORFLOW_AVAILABLE:
+                        raise ImportError(
+                                "TensorFlow framework was selected, but TensorFlow is not installed. "
+                                "Please install it by running: pip install kusa[tensorflow]"
+                            )
                     if not isinstance(X_train, tf.Tensor):
                         X_train = tf.convert_to_tensor(X_train, dtype=tf.float32)
                         X_val = tf.convert_to_tensor(X_val, dtype=tf.float32)
@@ -60,6 +77,11 @@ class ModelManager:
                     model = user_train_func(X_train, y_train, X_val, y_val, **(hyperparams or {}))
 
                 elif framework == "pytorch":
+                    if not PYTORCH_AVAILABLE:
+                            raise ImportError(
+                                "PyTorch framework was selected, but PyTorch is not installed. "
+                                "Please install it by running: pip install kusa[pytorch]"
+                            )
                     def to_tensor(df):
                         if isinstance(df, pd.Series):
                             if df.dtype == "O":

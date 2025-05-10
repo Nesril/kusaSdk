@@ -1,4 +1,7 @@
 /venv
 /build
 /.env
-/kusa/config
+__pycache__,
+*.pyc 
+/dist
+*.egg-info

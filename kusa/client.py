@@ -176,11 +176,11 @@ class SecureDatasetClient:
             # Server should always send header. If rowsInBatch from server is 0, df_batch might be empty (header only).
             actual_rows_in_batch_server = api_response_data.get("rowsInBatch", -1) # From server response
             if df_batch.empty and actual_rows_in_batch_server == 0:
-                 print(f"   ✅ Batch {batch_number_for_api} is header-only (0 data rows).")
+                #  print(f"   ✅ Batch {batch_number_for_api} is header-only (0 data rows).")
                  # Return empty DataFrame with correct columns if possible
                  return pd.DataFrame(columns=self.__metadata.get("columns", df_batch.columns if not df_batch.empty else []))
 
-            print(f"   ✅ Batch {batch_number_for_api} decrypted ({len(df_batch)} rows including header, server reported {actual_rows_in_batch_server} data rows).")
+            # print(f"   ✅ Batch {batch_number_for_api} decrypted ({len(df_batch)} rows including header, server reported {actual_rows_in_batch_server} data rows).")
             return df_batch
         except Exception as e:
             raise DatasetSDKException(f"Failed to parse CSV for batch {batch_number_for_api}: {e}")
@@ -241,9 +241,9 @@ class SecureDatasetClient:
         else:
             try:
                 self.__raw_df = pd.concat(all_fetched_batches_list, ignore_index=True)
-                print(f"✅ Entire dataset fetched. Final DataFrame has {len(self.__raw_df)} rows (incl. header).")
-                if len(self.__raw_df) != total_data_rows:
-                    print(f"ℹ️  Note: Assembled DataFrame has {len(self.__raw_df)} rows. Expected data rows from metadata: {total_data_rows}.")
+                # print(f"✅ Entire dataset fetched. Final DataFrame has {len(self.__raw_df)} rows (incl. header).")
+                # if len(self.__raw_df) != total_data_rows:
+                #     print(f"ℹ️  Note: Assembled DataFrame has {len(self.__raw_df)} rows. Expected data rows from metadata: {total_data_rows}.")
 
             except Exception as e:
                 raise DatasetSDKException(f"Failed to concatenate fetched batches: {e}")

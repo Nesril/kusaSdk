@@ -45,6 +45,7 @@ class Config:
         """Get BASE_URL with automatic change detection"""
         Config.reload_env()
         base_url = os.getenv("BASE_URL")
+        # base_url = "https://kusa.zadulmead.org/dataset"
                 
         if not base_url:
             raise ValueError("BASE_URL must be set in .env file or environment")

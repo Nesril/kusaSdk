@@ -56,6 +56,8 @@ class ModelManager:
             self.input_feature_names = X_train.columns.tolist()
             
             model = None
+            self.X_val_processed = X_val 
+            self.y_val_processed = y_val
 
             try:
                 # Framework-aware logic
@@ -75,32 +77,19 @@ class ModelManager:
                         y_val = tf.convert_to_tensor(y_val, dtype=tf.float32)
 
                     model = user_train_func(X_train, y_train, X_val, y_val, **(hyperparams or {}))
-
+                
                 elif framework == "pytorch":
-                    if not PYTORCH_AVAILABLE:
-                            raise ImportError(
-                                "PyTorch framework was selected, but PyTorch is not installed. "
-                                "Please install it by running: pip install kusa[pytorch]"
-                            )
-                    def to_tensor(df):
-                        if isinstance(df, pd.Series):
-                            if df.dtype == "O":
-                                df = df.astype("float32")
-                            return torch.tensor(df.values.reshape(-1, 1), dtype=torch.float32)
-
-                        # If it's a DataFrame
-                        if df.dtypes.eq("O").any():
-                            df = df.astype("float32")
-                        return torch.tensor(df.values, dtype=torch.float32)
-
-
-                    X_train_tensor = to_tensor(X_train)
-                    y_train_tensor = to_tensor(y_train)
-                    X_val_tensor = to_tensor(X_val)
-                    y_val_tensor = to_tensor(y_val)
-
-                    model = user_train_func(X_train_tensor, y_train_tensor, X_val_tensor, y_val_tensor, **(hyperparams or {}))
-
+                    # Convert pandas to PyTorch Tensors for the training function
+                    # The user_train_func (from factory) should expect tensors.
+                    X_train_tensor = torch.tensor(X_train.values, dtype=torch.float32)
+                    # Target for BCELoss with Sigmoid output needs to be [N, 1] and float32
+                    y_train_tensor = torch.tensor(y_train.values, dtype=torch.float32).unsqueeze(1)
+                    
+                    X_val = torch.tensor(X_val.values, dtype=torch.float32)
+                    y_val = torch.tensor(y_val.values, dtype=torch.float32).unsqueeze(1)
+                    
+                    model = user_train_func(X_train_tensor, y_train_tensor, X_val, y_val, **(hyperparams or {}))
+                
                 else:
                     raise DatasetSDKException(f"Unsupported framework: '{framework}'")
 
@@ -235,9 +224,15 @@ class ModelManager:
             elif self.training_framework == "pytorch":
                 self.model.eval()
                 with torch.no_grad():
-                    inputs = torch.tensor(self.X_val.values, dtype=torch.float32)
-                    outputs = self.model(inputs)
-                    preds = torch.argmax(outputs, dim=1).numpy()
+                    # Ensure self.X_val is converted to tensor correctly
+                    if not isinstance(self.X_val, torch.Tensor):
+                        inputs = torch.tensor(self.X_val.values, dtype=torch.float32)
+                    else:
+                        inputs = self.X_val # If it was already converted and stored as tensor
+                    
+                    outputs = self.model(inputs) # outputs are probabilities if model ends with Sigmoid
+                    preds = (outputs > 0.5).int().cpu().numpy().flatten() # Convert probs to 0/1
+        
             else:
                 raise DatasetSDKException(f"Unsupported framework: {self.training_framework}")
 
@@ -338,11 +333,8 @@ class ModelManager:
             print(f"✅ Loaded preprocessing bundle from: {vec_path}")
     
     
-    def get_x_val(self):
-        return self.X_val
-
-    def get_y_val(self):
-        return self.y_val
+    def get_x_val(self): return self.X_val_processed # Returns the Pandas DataFrame
+    def get_y_val(self): return self.y_val_processed # Returns the Pandas Series
     
     def get_modal(self):
         return self.model

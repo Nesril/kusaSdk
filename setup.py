@@ -7,7 +7,7 @@ URL = 'https://github.com/Nesril/kusaSdk'
 EMAIL = 'nesredinhaji715@gmail.com' 
 AUTHOR = 'Nesredin  / HAWD Techs' 
 REQUIRES_PYTHON = '>=3.7.0' 
-VERSION = '0.0.7' 
+VERSION = '0.0.9' 
 
 REQUIRED = [
     'requests>=2.20.0',

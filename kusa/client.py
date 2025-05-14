@@ -293,6 +293,8 @@ class SecureDatasetClient:
         self.__y_val = self.model_manager.get_y_val()
         
 
+    def get_processed_data(self):
+        return self.preprocessing_manager.get_processed_data()
             
     def evaluate(self):
         return self.model_manager.evaluate()

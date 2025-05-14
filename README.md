@@ -1,5 +1,5 @@
 
-# Kusa SDK 0.0.7 🛡️
+# Kusa SDK 🛡️
 
 **Securely access, preprocess, and train machine learning models on datasets from the Kusa platform.**
 
